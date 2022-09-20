@@ -1,0 +1,1032 @@
+#!/usr/bin/env python
+# coding=utf-8
+__author__ = ''
+__version__ = '2.0.1'
+__date__ = '2022/08/18'
+import sys, argparse, os, glob, subprocess, re, time, datetime
+# configDir = '/opt/seqtools/source/wh-tools/src'
+# sys.path.append(configDir)
+from modules.MySqlConn import Mysql
+import configparser
+import subprogram3
+import Config
+from functools import partial
+from multiprocessing import Pool, Queue, Process
+#import modules.Align_and_Call_sentieon as ac
+from modules.tools import q30Stat, formatLabel
+from modules import mail
+
+# paths = os.path.dirname(os.path.realpath(__file__))
+paths = os.path.dirname(os.path.realpath("/home/tianxl/pipeline/CNV_analyse/sentieon_pip"))
+
+
+parser = argparse.ArgumentParser(description='DNA(DNA Analysis Pipeline) by me', epilog='It is used for DNA analyse')
+parser.add_argument('--version', action='version', version='%(prog)s 2.0')
+
+Pipe = parser.add_argument_group('Pipeline')
+Pipe.add_argument('-r', '--Rename', action='store_true', help='rename raw fastq')
+Pipe.add_argument('-q','--QC',action='store_true', help='run Trimmomatic to quality trim reads')
+Pipe.add_argument('--no_fqc',action='store_true', default=False, help='run fastqc or not')
+Transcriptome = Pipe.add_mutually_exclusive_group()
+Transcriptome.add_argument('-cf',metavar='dna',default='/data/hg38/reference/GCA_000001405.15_GRCh38_no_alt_analysis_set.fna',help='reference [File]')
+Pipe.add_argument('-m','--Mapping',action='store_true',help='run bwa Mapping to ref')
+Pipe.add_argument('--aln',default="PE",help="mapping with SE or PE mode,default PE")
+Pipe.add_argument('-rd','--Dedup',action='store_true',help='remove duplicate seq')
+Pipe.add_argument('--depth',action='store_true',help = "run mosdepth" )
+Pipe.add_argument('--recal',action="store_true",default=False,help="run recal")
+Pipe.add_argument('--mt',action="store_true",default=False,help="run MitoDisease caller process")
+Pipe.add_argument('--no_mutect',action='store_true',help='skip running mutect2 for MT')
+Pipe.add_argument('--only_mutect',action='store_true',help='just run mutect2')
+Group = Pipe.add_mutually_exclusive_group()
+Group.add_argument('--sen',action="store_true",default=False,help="run geno with sen")
+Group.add_argument('--sam',action="store_true",default=False,help="run geno with samtools")
+Pipe.add_argument('--varscan_min',default="0.15",help="vcf flag")
+Pipe.add_argument('--varscan_max',default="0.85",help="vcf flag")
+Pipe.add_argument('--flag',metavar="flag",help="vcf flag")
+Pipe.add_argument('--vqsr',action="store_true",default=False,help="run vqsr filter")
+Pipe.add_argument('-b','--bed',required=True,help="panel region file")
+Pipe.add_argument('--gap',type=int,default=100,help="Gap bases before and after the bed area")
+Pipe.add_argument('--somatic',metavar="call somatic variants",help="call somatic variants paird (example:tumor1/normal1,tumor2/normal2")
+Pipe.add_argument('--tumor_only',metavar="tumor only",help='call samples somatic variants by tumor only,example:A,B,C or all')
+Pipe.add_argument('--qcstat',action='store_true',default=False,help="run QC stat")
+Pipe.add_argument('--cnv','--Callcnv',action='store_true',help='run cnvkit to call cnv')
+Pipe.add_argument('-t','--task_num',type=int,default=5,help='task num')
+Pipe.add_argument('--all_sites',action="store_true",default=False,help='call all positions in  bed regions or not')
+Pipe.add_argument('--anno',action='store_true',default=False,help='run annovar')
+Pipe.add_argument('--cbvcf',metavar="combine gvcf",help="combine g.vcf with sen (example:A_B_C,D_E_F)")
+Pipe.add_argument('--sv',action='store_true',default=False,help='run sv calling')
+Pipe.add_argument('--xhmm',action='store_true',default=False,help='run xhmm')
+Pipe.add_argument('--clamms',action='store_true',default=False,help='run clamms')
+Pipe.add_argument('--loh',action='store_true',default=False,help='run loh')
+Pipe.add_argument('--cnvkit',action='store_true',help='run cnvkit or not')
+Mail = Pipe.add_mutually_exclusive_group()
+Mail.add_argument('--mail',action='store_true',help='email or not')
+Mail.add_argument('--ccmail',metavar='ccmail',help='email or not')
+Pipe.add_argument('--db',action='store_true',help='collect snp for local database')
+Pipe.add_argument('--refV',default="hg38",help="reference genome version,hg19 or hg38")
+Pipe.add_argument('-cfg',metavar='config',default='%s/CNV_analyse.ini' %paths,help='configfile,default %s/CNV_analyse.ini' % paths)
+Pipe.add_argument('--WES_mode',action='store_true',default=False,help="")
+Pipe.add_argument('--skip',action='store_true',default=False,help='skip some steps')
+# Anno = parser.add_argument_group('Annotation')
+# ORF = Anno.add_mutually_exclusive_group()
+args = parser.parse_args()
+
+start = time.time()
+config = configparser.SafeConfigParser()
+config.read(args.cfg)
+cg = config.get
+run = subprogram3.run
+checkfile = subprogram3.checkfile
+checkdir = subprogram3.checkdir
+pdf2png = subprogram3.pdf2png
+utils = '%s/../utils' % paths
+current = os.path.realpath('./')
+fqDir = current
+logDir = os.path.join(fqDir, 'log')
+fqcDir = os.path.join(fqDir, 'fqc')
+resultsDir = os.path.join(fqDir, 'results')
+cleanDir = os.path.join(resultsDir, 'clean_data')
+statsDir = os.path.join(resultsDir, 'stats')
+bamDir = os.path.join(resultsDir, 'bam')
+dupDir = os.path.join(resultsDir, 'dedup_bam')
+recalDir = os.path.join(resultsDir, 'recal_bam')
+depthDir = os.path.join(resultsDir, 'depth')
+gvcfDir = os.path.join(resultsDir, 'GVCF')
+rawVcfDir = os.path.join(resultsDir, 'RAW_VCF')
+vqsrDir = os.path.join(rawVcfDir, 'recal_vcf')
+annoDir = os.path.join(resultsDir, 'annovar-files')
+somaticDir = os.path.join(resultsDir, 'Somatic')
+cnvkitDir = os.path.join(resultsDir, 'cnvkit')
+
+checkdir(logDir)
+checkdir(fqcDir)
+checkdir(statsDir)
+
+third = "/home/tianxl/pipeline/third-party/"
+adapter = "/home/tianxl/pipeline/utils/adapter.fa"
+ponFile = "/storage/project/WES/panel_of_normalVCF_201030/panel_of_normal.vcf"
+proList = []
+OutFile = 'project.list'
+options = '-Xmx10g'
+task_num = int(args.task_num)
+
+if args.bed is not None and config.has_option('Bed', args.bed):
+    bed = '%s' % cg('Bed', args.bed)
+    intervals = bed.replace(".bed", ".intervals")
+    if config.has_option('Bed', args.bed + "_xhmm"):
+        xhmmBed = '%s' % cg('Bed', args.bed + "_xhmm")
+        xhmmintervals = xhmmBed.replace('.bed', '.intervals')
+else:
+    bed = args.bed
+    intervals = bed.replace(".bed", ".intervals")
+
+if args.bed == 'PA':
+    checkdir(gvcfDir)
+if args.flag:
+    flag = '-' + args.flag
+else:
+    flag = ""
+
+gap = args.gap
+if args.bed == 'PA':
+    gap = 0
+
+if args.cf is not None and os.path.isfile('%s.bwt' % args.cf):
+    contig = args.cf
+else:
+    if not os.path.isfile('contig.fa.bwt'):
+        print('## can not find config fasta bwa-index file, will creat it')
+        run('bwa-index contig.fa contig.fa')
+    contig = 'contig.fa'
+
+run('export SENTIEON_PYTHON=/usr/bin/python2')
+# run('export bwt_max_mem=100G')
+# run('export TMPDIR=/storage/tianxl/')
+sentieon = "/opt/seqtools/source/sentieon-genomics-201911/bin/sentieon"
+
+if args.refV == "hg19":
+    known_hapmap = "/data/hg19/gatk/hapmap_3.3.hg19.sites.vcf"
+    known_dbsnp = "/data/hg19/gatk/dbsnp_138.hg19.vcf"
+    known_1000G = "/data/hg19/gatk/1000G_phase1.snps.high_confidence.hg19.sites.vcf"
+    known_omni = "/data/hg19/gatk/1000G_omni2.5.hg19.sites.vcf"
+    known_mills = "/data/hg19/gatk/Mills_and_1000G_gold_standard.indels.hg19.sites.vcf"
+elif args.refV == "hg38":
+    known_hapmap = "/data/hg38/gatk/hapmap_3.3.hg38.vcf.gz"
+    known_dbsnp = "/data/tool_data/gatk/hg38/dbsnp_138.hg38.vcf.gz"
+    known_1000G = "/data/hg38/gatk/1000G_phase1.snps.high_confidence.hg38.vcf.gz"
+    known_omni = "/data/hg38/gatk/1000G_omni2.5.hg38.vcf.gz"
+    known_mills = "/data/hg38/gatk/Mills_and_1000G_gold_standard.indels.hg38.vcf.gz"
+else:
+    print('## don\'t know ref version,please check')
+    sys.exit(2)
+known_hapmap_param = "hapmap,known=false,training=true,truth=true,prior=15.0"
+known_omni_param = "omni,known=false,training=true,truth=false,prior=12.0"
+known_1000G_param = "1000G,known=false,training=true,truth=false,prior=10.0"
+known_dbsnp_param = "dbsnp,known=true,training=false,truth=false,prior=2.0"
+known_mills_param = "mills,known=false,training=true,truth=true,prior=12.0"
+
+global annotation_text
+annotation_text = ""
+annotation_array = ["QD", "MQ", "MQRankSum", "ReadPosRankSum", "FS"]
+for i in annotation_array:
+    annotation_text = annotation_text + " --annotation " + i
+
+
+#mysql = Mysql()
+
+# fqDir = './'
+if args.Rename:
+    mysql=Mysql()
+    for file in os.listdir(fqDir):
+        if '.fastq.gz.raw' in file:
+            pass
+        elif '_R1.fastq.gz' in file:
+            fileName = file.split('.')[0].split('_')[0]
+        elif '_R1_001.fastq.gz' in file:
+            fileName = file.split('.')[0].split('_')[0]
+        else:
+            fileName = ''
+
+        if fileName:
+            sample_num = '__00' + fileName.split('-')[1]
+            query = "SELECT 家系编号 fam_code, 检测项目 project, 外部条码 barcode FROM sample.abortion WHERE 条形码 like '" + sample_num + "'"
+            queryRes = mysql.getAll(query)
+            if queryRes:
+                # global projectNum
+                famCode = queryRes[0]['fam_code'].decode('utf-8').replace(" ", "")
+                project = queryRes[0]['project'].decode('utf-8')
+                barcode = queryRes[0]['barcode'].decode('utf-8')
+                # print(famCode,project)
+                newFileName = famCode + '[' + fileName.split('-')[1] + ']'
+                print(fileName, newFileName)
+                os.system(' '.join(['rename', fileName, newFileName, fileName + '*']))
+                # regex_str = "[\u4E00-\u9FA5]+目"
+                regex_str = "项目"
+                regex_str1 = "流产物检测"
+                regex_str2 = "流产物染色体CNVs检测 100K"
+                regex_str3 = "流产物染色体CNVs检测"
+                regex_str4 = "流产物遗传学整体解决方案"
+                match_obj = re.match(regex_str, project)
+                match_obj1 = re.match(regex_str1, project)
+                match_obj2 = re.match(regex_str2, project, re.IGNORECASE)
+                match_obj3 = re.match(regex_str3, project, re.IGNORECASE)
+                match_obj4 = re.match(regex_str4, project)
+                if match_obj:
+                    projectNum = project[-1]
+                elif match_obj1:
+                    projectNum = project[5]
+                elif match_obj2:
+                    projectNum = str(2)
+                elif match_obj3:
+                    projectNum = str(1)
+                elif match_obj4:
+                    projectNum = str(3)
+                # print(project)
+                if match_obj or match_obj1 or match_obj2 or match_obj3 or match_obj4:
+                    proList.append(newFileName + '_' + file.split('.')[0].split('_')[1] + '\t' + 'project' + projectNum)
+                else:
+                    proList.append(newFileName + '_' + file.split('.')[0].split('_')[1] + '\t' + 'others' + '\t' + barcode)
+            else:
+                print('can\'t find this code in database:', fileName)
+    result = '\n'.join(proList)
+    # result = result.decode()
+    with open(OutFile, "w") as text_file:
+        text_file.write(result)
+
+    mysql.dispose()
+
+# if not args.no_fqc and not args.skip and not os.path.exists(fqcDir + '/' + 'multiqc_data'):
+#     fq1All = os.path.join(fqDir, '*R1*fastq.gz')
+#     fq2All = os.path.join(fqDir, '*R2*fastq.gz')
+#     fqcCmd = ['fastqc', '-t', '10', '-o', fqcDir, '-noextract', '-f', 'fastq', fq1All, fq2All, '&>' + os.path.join(logDir, 'fastqc.log'), '&']
+#     print(' '.join(fqcCmd))
+#     os.system(' '.join(fqcCmd))
+if not args.no_fqc and not args.skip:
+    fq1All = [sample for sample in os.listdir(fqDir) if sample.find('R1') != -1 and sample.find('fastq.gz') != -1]
+    for fq1 in fq1All:
+        fq2 = fq1.replace('R1','R2')
+        name=fq1.replace('_R1.fastq.gz','')
+        if '-LJKY' in fq1 or '-HFZC' in fq1 or '-MTZ' in fq1:
+            name = '-'.join(fq1.split('-')[0:2])        
+        fqcCmd = ['fastp', '-w', '10', '-h', fqcDir+'/'+name+'.html', '-j',fqcDir+'/'+name+'.json', '-i', fqDir+'/'+fq1,'-I',fqDir+'/'+fq2 ]
+        print(' '.join(fqcCmd))
+        os.system(' '.join(fqcCmd))
+# if not args.no_fqc:
+    # os.system(' '.join(['multiqc', '-f', fqcDir, '-o', fqcDir, '-c', '/home/nicky/.multiqc_config.yaml']))
+
+generalFile = os.path.join(statsDir, 'all_general.txt')
+if not os.path.exists(generalFile):
+    generalFile = q30Stat(fqDir, generalFile)
+
+isLabel = False
+if not args.skip and not os.path.exists(statsDir + '/' + 'tag_label.txt'):
+    for file in os.listdir(fqDir):
+        if not isLabel and ('-LJKY' in file or '-HFZC' in file or '-MTZ' in file):
+            isLabel = True
+    if isLabel:
+        labelCmd = ['python', '/workshop/project/Valid/mole_tag/label-count-v2.py', fqDir, '10']
+        subprocess.Popen(labelCmd)
+# Run Trimmomatic to quality trim reads
+if args.QC is True:
+    checkdir(cleanDir)
+    print('# Run Trimmomatic to quality trim reads')
+    run('rename _001.fastq.gz .fastq.gz *')
+    if len(glob.glob('*_R1.fastq.gz')) == 0:
+        print('can NOT find raw fastq file, please check')
+        sys.exit(2)
+    for fq1 in glob.glob('*_R1.fastq.gz'):
+        fqname = fq1.split("_R1.fastq.gz")[0]
+        if args.aln == 'PE':
+            fq2 = fq1.replace("_R1", "_R2")
+            run('java -jar %s/trimmomatic-0.32.jar PE -threads  %s %s %s %s/%s.clean_R1.fastq.gz %s/%s.rm_R1.fq.gz %s/%s.clean_R2.fastq.gz \
+                %s/%s.rm_R2.fq.gz ILLUMINACLIP:%s:2:30:10 LEADING:20 TRAILING:20 SLIDINGWINDOW:4:20 MINLEN:30  TOPHRED33'
+                % (third, cg('Mapping', 'threads'), fq1, fq2, cleanDir, fqname, cleanDir, fqname, cleanDir, fqname, cleanDir, fqname, adapter),
+                task_num)
+        elif args.aln == 'SE':
+            run('java -jar %s/trimmomatic-0.32.jar SE -threads  %s %s %s/%s.clean_R1.fastq.gz %s/%s.rm_R1.fq.gz  ILLUMINACLIP:%s:2:30:10 LEADING:20 TRAILING:20 SLIDINGWINDOW:4:20 MINLEN:30  TOPHRED33' %(third,cg('Mapping','threads'),fq1,cleanDir,fqname,cleanDir,fqname,adapter),task_num)
+
+# run Trinity for RNA-Seq De novo Assembly
+
+left = glob.glob('%s/*.clean_R1.fastq.gz' %cleanDir)
+right = glob.glob('%s/*.clean_R2.fastq.gz' %cleanDir)
+if args.QC or len(left) > 0:
+    left = left
+    right = right
+else:
+    left = glob.glob('*R1*.fastq.gz')
+    right = glob.glob('*R2*.fastq.gz')
+
+if args.cf is not None:
+    #print ('# Finding Reference file')
+    checkfile(args.cf)
+
+    
+
+def run_map(fq):
+    fq_name = formatLabel(fq).split("/")[-1].split('_')[0].split(".")[0]
+    # print(fq_name)
+    fq2 = fq.replace("R1","R2")
+    if args.aln == "SE":
+        run('%s bwa mem  \
+-R "@RG\\tID:%s\\tSM:%s\\tPL:ILLUMINA" %s  %s  -t  %s \
+|  %s util sort  -r %s -t %s \
+-o %s/%s.sorted.bam --sam2bam -i - 2>%s/%s.bwa.log' %(sentieon,fq_name,fq_name,contig,fq,cg('Mapping','threads'),sentieon,contig,cg('Mapping','threads'),bamDir,fq_name,logDir,fq_name),task_num)
+    elif args.aln == "PE":
+        run('%s bwa mem  -R "@RG\\tID:%s\\tSM:%s\\tPL:ILLUMINA" %s  %s  %s  -t  %s |  %s util sort  -r %s -t %s -o %s/%s.sorted.bam --sam2bam -i - 2>%s/%s.bwa.log' %(sentieon,fq_name,fq_name,contig,fq,fq2,cg('Mapping','threads'),sentieon,contig,cg('Mapping','threads'),bamDir,fq_name,logDir,fq_name),task_num)
+    run('samtools flagstat -@ %s %s/%s.sorted.bam > %s/%s.mapstats' %(cg('Mapping','threads'),bamDir,fq_name,statsDir,fq_name),task_num)
+
+def access_map(mapLog):
+    mapped_per, pro_mapped = '', ''
+    with open(mapLog) as log:
+        for line in log:
+            line = line.strip()
+            if 'mapped (' in line:
+                mapped_per = line.split('mapped (')[1].split(':')[0].strip()
+            if 'properly paired (' in line:
+                pro_mapped = line.split('properly paired (')[1].split(':')[0].strip()
+
+    if mapped_per and pro_mapped:
+        return '\t'.join([mapped_per, pro_mapped])
+    else:
+        return ''
+
+def access_dup(dupLog):
+    # singleReads, endPairs, total, dupReads = 0, 0, 0, 0
+    with open(dupLog) as log:
+        for line in log:
+            line = line.strip()
+            if 'Unknown Library' in  line:
+                lineInfo = line.split("\t")
+                dupRatio = lineInfo[-2]
+    dup_per = float(dupRatio)*100
+    return dup_per
+
+def run_dedup(bam):
+    bam_name = bam.split("/")[-1].split(".")[0]
+    run('%s driver -r %s -i %s -t %s --algo LocusCollector --fun score_info %s/%s.score.gz' %(sentieon,contig,bam,cg('Mapping','threads'),dupDir,bam_name),task_num)
+    run('%s driver -r %s -i %s -t %s --algo Dedup --rmdup --score_info %s/%s.score.gz  --metrics %s/%s.metric.txt %s/%s.dedup.sorted.bam  2>%s/%s.rmdup.log' %(sentieon,contig,bam,cg('Mapping','threads'),dupDir,bam_name,statsDir,bam_name,dupDir,bam_name,logDir,bam_name),task_num)
+    os.remove(bam)
+
+def run_recal(dedupbam):
+    dedupbamName = dedupbam.split('/')[-1][:-17]
+    run('%s driver -r %s -i %s -t %s  --algo QualCal \
+-k %s \
+-k %s \
+-k %s \
+-k %s \
+%s/%s.recal_data.table' %(sentieon,contig,dedupbam,cg('Mapping','threads'),known_dbsnp,known_1000G,known_omni,known_hapmap,recalDir,dedupbamName),task_num)
+    if args.sam:
+        run('%s driver -i %s -q %s/%s.recal_data.table -t %s --algo ReadWriter %s/%s.recal.sorted.bam' %(sentieon,dedupbam,recalDir,dedupbamName,cg('Mapping','threads'),recalDir,dedupbamName),task_num)
+
+def run_depth(dedupbam):
+    # print(dedupbam)
+    sampleName = dedupbam.split("/")[-1].split(".")[0]
+    run('mosdepth -t 4 -x -n -b %s -T 1,4,10,20,30,40,50,100,200,500,1000,5000  %s/%s %s' %(bed,depthDir,sampleName,dedupbam),task_num)
+    if args.mt:
+        MTdepthDir = depthDir + "/MT_depth"
+        run('mosdepth -t 4 -x -n -b /data/bed/chrMT.bed -T 1,10,50,100,500,1000,2000,3000,4000,5000,10000  %s/%s_MT %s' %(MTdepthDir,sampleName,dedupbam),task_num)
+
+def run_sen(inputbam):
+    if args.all_sites:
+        emit_mode = "all"
+    else:
+        emit_mode = "gvcf"
+    inputbamName = inputbam.split('/')[-1].split('.')[0]
+    readtable = os.path.join(recalDir,inputbamName+".recal_data.table")
+    if not args.only_mutect:
+        if os.path.exists(readtable):
+            run('%s driver -r %s -t %s -i %s \
+-q %s \
+--interval %s \
+--interval_padding %s \
+--algo Haplotyper \
+--emit_conf 10 \
+--call_conf 10 \
+--emit_mode gvcf \
+%s/%s%s.g.vcf.gz' %(sentieon,contig,cg('Mapping','threads'),inputbam,readtable,intervals,gap,gvcfDir,inputbamName,flag),task_num)
+        elif args.bed == 'PA':
+            run('%s driver -r %s -t %s -i %s \
+--interval %s \
+--interval_padding %s \
+--algo Haplotyper \
+--emit_conf 10 \
+--call_conf 10 \
+--emit_mode gvcf \
+%s/%s%s.g.vcf.gz' %(sentieon,contig,cg('Mapping','threads'),inputbam,intervals,gap,gvcfDir,inputbamName,flag),task_num) 
+        if not args.all_sites :
+            emit_mode = "variant"
+        if args.cbvcf != 'all' and args.bed not in ("PA"):
+            run('%s driver -r %s -t %s  \
+--algo GVCFtyper \
+-v %s/%s%s.g.vcf.gz \
+--emit_mode %s \
+--emit_conf 10 \
+--call_conf 10 \
+%s/%s%s.raw.vcf.gz' %(sentieon,contig,cg('Mapping','threads'),gvcfDir,inputbamName,flag,emit_mode,rawVcfDir,inputbamName,flag),task_num)
+    if args.mt and not args.no_mutect:
+        mtVcfFile = os.path.join(rawVcfDir,inputbamName + ".mitochondria.raw.vcf.gz")
+        run('gatk --java-options %s Mutect2 -R %s -I %s -L chrMT --mitochondria-mode -min-AF 0.04 --max-reads-per-alignment-start 0 -O %s --max-mnp-distance 0 --native-pair-hmm-threads %s' %(options,contig,inputbam,mtVcfFile,cg('Mapping','threads')),task_num)
+        outVcf = mtVcfFile.replace('.raw.vcf.gz','.vcf.gz')
+        run('gatk --java-options %s FilterMutectCalls  -R  %s --mitochondria-mode --min-allele-fraction 0.04 -V %s  -O  %s --max-alt-allele-count 4' %(options,contig,mtVcfFile,outVcf),task_num)
+
+def run_cbvcf(gvcfList):
+    # print(gvcfList)
+    gvcfList.sort()
+    outName = gvcfList[0].split("-v")[1].split("/")[-1].split(".g.vcf.gz")[0].split('_')[0] + '-' +  gvcfList[-1].split("-v")[1].split("/")[-1].split(".g.vcf.gz")[0].split('_')[0] 
+    outName = outName.replace(" ","")
+    gvcfList = " ".join(gvcfList)
+    run('%s driver -r %s -t %s  \
+--algo GVCFtyper \
+%s \
+--emit_conf 10 \
+--call_conf 10 \
+--emit_mode variant \
+%s/%s.raw.vcf.gz' %(sentieon,contig,cg('Mapping','threads'),gvcfList,rawVcfDir,outName),task_num)
+    rawvcf = '%s/%s.raw.vcf.gz' %(rawVcfDir,outName)
+    outAnno = '%s/%s.anno' %(annoDir,outName)
+    if args.cbvcf != 'all':
+        annoCmd = ' '.join(['table_annovar.pl', rawvcf, '/data/hg38/annodb -buildver hg38', '-out', outAnno, '-remove -protocol', \
+                        'refGene,ensGene,dbscsnv11,cosmic70,dbnsfp41a,genomicSuperDups,intervar_20180118', \
+                        '-operation', \
+                        'g,g,f,f,f,r,f', '-nastring .', '-vcfinput', '-polish'])
+        run('%s' %annoCmd,task_num)
+        # inHouseCmdList = []
+        inHouseCmd = ('wht', 'dbanno', '-f', resultsDir, '--omim', '--excel', '--local')
+        if args.bed in ('IDTEx', 'WES', 'IDP', 'IDT_PPGL', 'CES') or args.WES_mode:
+            inHouseCmd += ('--panel', '-fh')
+        elif args.bed in ('CYP21A2', 'CYP21A1P', 'HBB_cap', 'CYP17A1', 'GBA'):
+            inHouseCmd += ('-maf', '100')
+        elif args.bed in ('ag_fevr'):
+            inHouseCmd += ('-maf', '100', '--panel')
+        elif args.bed in ('chrMT'):
+            inHouseCmd += ('-maf', '100', '--no_filter')
+        else:
+            inHouseCmd += ('-maf', '100', '--no_filter')
+
+        tmpCmd = list(inHouseCmd)
+        tmpCmd += ['-i', outName + '.anno.hg38_multianno.txt']
+        dbannoCmd = ' '.join(tmpCmd) 
+        if os.path.exists('%s/%s.anno.hg38_multianno.txt' %(annoDir,outName)):
+            run('%s' %dbannoCmd,task_num)
+        if os.path.exists('%s/%s.whanno.xlsx'%(resultsDir,outName)):
+            run('python /home/zhangxp/tools/relatedness.py %s %s'%(resultsDir,outName))
+  
+def run_sam(inputbam):
+    if args.all_sites:
+        emit_mode = ""
+    else:
+        emit_mode = "--variants"
+    inputbamName = inputbam.split("/")[-1].split(".")[0]
+    run('samtools mpileup  -d 1000000 -l %s  -f %s  %s | java -Xmx20g -jar /opt/seqtools/source/VarScan.jar mpileup2cns --min-var-freq %s --min-freq-for-hom %s --output-vcf 1 %s -  > %s/%s%s.raw.vcf' %(bed,contig,inputbam,args.varscan_min,args.varscan_max,emit_mode,rawVcfDir,inputbamName,flag),task_num)
+    run('bgzip %s/%s%s.raw.vcf' %(rawVcfDir,inputbamName,flag),task_num)
+    
+def run_vqsr(rawvcf):
+    if "mito" not in rawvcf.split("/")[-1]:
+        sampleName = rawvcf.split("/")[-1].split(".")[0]
+        run('%s driver -r %s -t %s \
+--algo VarCal --vcf %s --var_type BOTH \
+--resource %s --resource_param %s \
+--resource %s --resource_param %s \
+--resource %s --resource_param %s \
+--resource %s --resource_param %s \
+--resource %s --resource_param %s \
+%s \
+--tranches_file %s/%s.tranches  %s/%s.recal.vcf ' %(sentieon,contig,cg('Mapping','threads'),rawvcf,known_1000G,known_1000G_param,known_dbsnp,known_dbsnp_param,known_hapmap,known_hapmap_param,known_mills,known_mills_param,known_omni,known_omni_param,annotation_text,vqsrDir,sampleName,vqsrDir,sampleName),task_num)
+        run('%s driver -r %s -t %s \
+--algo ApplyVarCal --vcf %s --var_type BOTH \
+--recal %s/%s.recal.vcf --sensitivity 99 \
+--tranches_file %s/%s.tranches %s/%s.both_recal.raw.vcf.gz' %(sentieon,contig,cg('Mapping','threads'),rawvcf,vqsrDir,sampleName,vqsrDir,sampleName,vqsrDir,sampleName),task_num)
+
+def run_anno(rawvcf):
+    sampleName = rawvcf.split('/')[-1].split('.')[0]
+    outName = os.path.join(annoDir,sampleName+'.anno')
+    # outName = rawvcf.replace(".raw.vcf.gz",".anno")
+    # outName = outName.replace(".somatic.vcf.gz",".anno")
+    # outName = outName.replace(rawVcfDir,annoDir)
+    # outName = outName.replace("recal_vcf","")
+    annoCmd = ' '.join(['table_annovar.pl', rawvcf, '/data/hg38/annodb -buildver hg38', '-out', outName, '-remove -protocol', \
+                        'refGene,ensGene,dbscsnv11,cosmic70,dbnsfp41a,genomicSuperDups,intervar_20180118', '-operation', \
+                        'g,g,f,f,f,r,f', '-nastring .', '-vcfinput', '-polish'])
+    run('%s' %annoCmd,task_num)
+    # run('')
+
+
+def run_somatic(pair):
+    pairgroup = pair.split("/")
+    # outbam = pair.replace('/','-')
+    outbam = pairgroup[0].split("_")[0] + '-' + pairgroup[1].split("_")[0]
+    for i in inputreadtables:
+        if pairgroup[0] in i:
+            tumorTable = i
+            tumorBam = tumorTable.replace(".recal_data.table",".dedup.sorted.bam")
+            tumorBam = tumorBam.replace(recalDir,dupDir)
+        elif pairgroup[1] in i:
+            normalTable = i
+            normalBam = normalTable.replace(".recal_data.table",".dedup.sorted.bam")
+            normalBam = normalBam.replace(recalDir,dupDir)
+        else:
+            pass
+    if tumorTable and tumorBam and normalTable and normalBam:
+        run('%s driver -t %s -r %s -i %s \
+-q %s -i %s -q %s \
+--algo Realigner \
+-k %s \
+-k %s \
+-k %s \
+-k %s \
+%s/%s.somatic.bam' %(sentieon,cg('Mapping','threads'),contig,tumorBam,tumorTable,normalBam,normalTable,known_dbsnp,known_1000G,known_omni,known_hapmap,somaticDir,outbam),task_num)
+        run('%s driver -t %s -r %s -i %s/%s.somatic.bam \
+--interval %s \
+--interval_padding %s \
+--algo TNhaplotyper --tumor_sample %s \
+--normal_sample %s \
+--dbsnp %s \
+%s/%s.somatic.vcf.gz' %(sentieon,cg('Mapping','threads'),contig,somaticDir,outbam,intervals,gap,pairgroup[0],pairgroup[1],known_dbsnp,rawVcfDir,outbam))
+    else:
+        print ("can not find input file, please check")
+        sys.exit(2)
+
+def run_tumor(sample):
+    sampleName = sample.split('/')[-1].split('.')[0]
+    readtable = os.path.join(recalDir,sampleName + ".recal_data.table")
+    run('sentieon driver -t %s -r %s \
+  -i %s -q %s \
+  --interval %s \
+  --interval_padding %s \
+  --algo TNscope --tumor_sample %s \
+  --pon %s --dbsnp %s %s/%s-tumor.vcf.gz' %(cg('Mapping','threads'),contig,sample,readtable,intervals,gap,sampleName,ponFile,known_dbsnp,rawVcfDir,sampleName),task_num)
+
+def run_cmd(cmd, workDir=None):
+    try:
+        step = subprocess.Popen(cmd, cwd=workDir)
+        step.wait()
+    except:
+        print(cmd, ' failed')
+
+def run_cnvkit(bam):
+    sampleName = bam.split('/')[-1].split('.')[0]
+    run('sh /home/zhangxp/tools/WES_CES.CNV.hg38.sh %s %s %s %s' %(bam,args.bed,cnvkitDir,sampleName),task_num)
+
+# run Bowtie2 Mapping to Transcripts
+if args.Mapping is True:
+    checkdir(bamDir)
+    print ('# run bwa Mapping to ref')
+    #checkfile('contig.fa')
+    if len(left) == 0:
+        print ('can not find clean fastq file, please check')
+        sys.exit(2)
+    
+    pool = Pool(processes = task_num)
+    pool.map(run_map, left)
+    pool.close()
+    pool.join()
+
+    mapList = []
+    for mapStat in os.listdir(statsDir):
+        if '.mapstats' in mapStat:
+            sample = mapStat.split('.mapstats')[0].split('_')[0]
+            mapped = access_map(os.path.join(statsDir, mapStat))
+            if mapped:
+                mapList.append('\t'.join([sample, mapped]))
+    if len(mapList) > 0:
+        with open(os.path.join(statsDir, 'all_mapped.txt'), 'w') as mapStats:
+            mapStats.write('\n'.join(mapList))
+
+# run SAMtools to Estimate Abundance
+if args.Dedup is True:
+    checkdir(dupDir)
+    bams = glob.glob('%s/*.sorted.bam' %bamDir)
+    # print (bams)
+    if len(bams) == 0:
+        print ('can not find bwa mapping result bam file, please check')
+        sys.exit(2)
+    pool = Pool(processes = task_num)
+    pool.map(run_dedup, bams)
+    pool.close()
+    pool.join()
+    dupList = []
+    for log in os.listdir(statsDir):
+        if '.metric.txt' in log:
+            sample = log.split('.metric.txt')[0].split('_')[0]
+            dup = access_dup(os.path.join(statsDir, log))
+            if dup >= 0:
+                dupList.append('\t'.join([sample, str(dup)]))
+    if len(dupList) > 0:
+        with open(os.path.join(statsDir, 'all_dup.txt'), 'w') as dupStat:
+            dupStat.write('\n'.join(dupList))
+
+if args.recal:
+    checkdir(recalDir)
+    dedupbams = glob.glob('%s/*.dedup.sorted.bam' %dupDir)
+    if len(dedupbams) == 0:
+        print ("can not find dedup bam file, please check")
+        sys.exit(2)
+    pool = Pool(processes = task_num)
+    pool.map(run_recal,dedupbams)
+    pool.close()
+    pool.join()
+
+if args.depth:
+    checkdir(depthDir)
+    dedupbams = glob.glob('%s/*.dedup.sorted.bam' %dupDir)
+    srtbams = glob.glob('%s/*.sorted.bam' %bamDir)
+    if len(dedupbams)> 0:
+        runBams = dedupbams
+    else:
+        if len(srtbams) == 0:
+            print ("can not find  bam file, please check")
+            sys.exit(2)
+        runBams = srtbams
+    if args.mt:
+        checkdir(depthDir + "/MT_depth")
+    pool = Pool(processes = task_num)
+    pool.map(run_depth,runBams)
+    pool.close()
+    pool.join()
+# if args.recal and args.sen:
+#     inputbams = glob.glob('%s/*.dedup.sorted.bam' %dupDir)
+# elif args.recal and args.sam:
+#     inputbams = glob.glob('%s/*.recal.sorted.bam' %recalDir)      
+# elif args.Dedup:
+#     inputbams = glob.glob('%s/*.dedup.sorted.bam' %dupDir)
+# else:
+#     inputbams = glob.glob('%s/*.sorted.bam' %bamDir)
+inputbams = []
+inputdedupBams = glob.glob('%s/*.dedup.sorted.bam' %dupDir)
+inputrecalBams = glob.glob('%s/*.recal.sorted.bam' %recalDir)
+inputreadtables = glob.glob('%s/*.recal_data.table' %recalDir)
+inputsrtBams = glob.glob('%s/*.sorted.bam' %bamDir)
+
+inputbams.append(inputdedupBams)
+inputbams.append(inputrecalBams)
+inputbams.append(inputreadtables)
+inputbams.append(inputsrtBams)
+# print (inputbams)
+# print (len(inputbams),len(inputrecalBams),len(inputdedupBams),len(inputsrtBams))
+if args.sen:
+    checkdir(gvcfDir)
+    checkdir(rawVcfDir)
+    if len(inputbams) == 0:
+        print("can not find any bam file, please check")
+        sys.exit(2)
+    elif args.recal and len(inputreadtables) == 0 and len(inputrecalBams) == 0:
+        print("can not find recal bam file, please check")
+        sys.exit(2)
+    elif len(inputrecalBams) > 0:
+        pool = Pool(processes = task_num)
+        pool.map(run_sen,inputrecalBams)
+        pool.close()
+        pool.join()
+    elif len(inputdedupBams) > 0:
+        pool = Pool(processes = task_num)
+        pool.map(run_sen,inputdedupBams)
+        pool.close()
+        pool.join()
+    elif len(inputsrtBams) > 0:
+        pool = Pool(processes = task_num)
+        pool.map(run_sen,inputsrtBams)
+        pool.close()
+        pool.join()
+    else:
+        print("can not find bam file, please check")
+        sys.exit(2)
+
+
+if args.sam:
+    checkdir(gvcfDir)
+    checkdir(rawVcfDir)
+    if len(inputbams) == 0:
+        print("can not find bam file, please check")
+        sys.exit(2)
+    elif len(inputrecalBams) > 0:
+        pool = Pool(processes = task_num)
+        pool.map(run_sam,inputrecalBams)
+        pool.close()
+        pool.join()
+    elif len(inputdedupBams) > 0:
+        pool = Pool(processes = task_num)
+        pool.map(run_sam,inputdedupBams)
+        pool.close()
+        pool.join()
+    elif len(inputsrtBams) > 0:
+        pool = Pool(processes = task_num)
+        pool.map(run_sam,inputsrtBams)
+        pool.close()
+        pool.join()
+    else:
+        print("can not find bam file, please check")
+        sys.exit(2)
+
+if args.somatic:
+    somaticGroup = args.somatic.split(",")
+    checkdir(somaticDir)
+    if len(inputbams) == 0:
+        print("can not find somatic bam file, please check")
+        sys.exit(2)
+    elif len(inputreadtables) > 0 and len(inputdedupBams) > 0:
+        pool = Pool(processes = task_num)
+        pool.map(run_somatic,somaticGroup)
+        pool.close()
+        pool.join()
+    else:
+        print("can not find table and bam file, please check")
+        sys.exit(2)
+
+if args.tumor_only:
+    bams = glob.glob('%s/*dedup.sorted.bam' %dupDir)
+    if args.tumor_only == 'all':
+        tumorGroup = glob.glob('%s/*dedup.sorted.bam' %dupDir)
+    else:
+        tumorSample = args.tumor_only.split(',')
+        tumorGroup = []
+        for i in tumorSample:
+            for h in bams:
+                if i in h:
+                    tumorGroup.append(h)
+    if len(tumorGroup) >= 1:
+        pool = Pool(processes = task_num)
+        pool.map(run_tumor,tumorGroup)
+        pool.close()
+        pool.join()
+
+if args.vqsr:
+    # vqsrDir = os.path.join(rawVcfDir, 'recal_vcf')
+    checkdir(vqsrDir)
+    rawVcf = glob.glob('%s/*.raw.vcf.gz' %rawVcfDir)
+    if len(rawVcf) == 0:
+        print("cat not find raw vcf,please check")
+    pool = Pool(processes = task_num)
+    pool.map(run_vqsr,rawVcf)
+    pool.close()
+    pool.join()
+
+
+def calSNP(item):
+    sampleName = item.split('/')[-1].split('.g.vcf.gz')[0].split('_')[0]
+    yGrepCmd = "zcat " + item + " | grep -v '#' | grep 'chrY' | "
+    x0GrepCmd = "zcat " + item + " | grep -v '#' | grep 'chrX' | grep '0/1' | wc -l"
+    x1GrepCmd = "zcat " + item + " | grep -v '#' | grep 'chrX' | grep '1/1' | wc -l"
+    if args.bed == 'PA' or args.bed == 'PAtest':
+        yGrepCmd += "awk '{split($10,a,\":\");split(a[2],b,\",\");sum+=b[1] + b[2]}END {print sum}'"
+    else:
+        yGrepCmd += " grep -v '0/0:0:' | awk '{split($10,a,\":\");split(a[2],b,\",\");sum=b[1] + b[2];if (sum >= 10) print $0 }'|wc -l"
+    yGrep = subprocess.check_output(yGrepCmd, shell=True).strip().decode('utf-8')
+    x0Grep = subprocess.check_output(x0GrepCmd, shell=True).strip().decode('utf-8')
+    x1Grep = subprocess.check_output(x1GrepCmd, shell=True).strip().decode('utf-8')
+    try:
+        int(yGrep)
+        int(x0Grep)
+        int(x1Grep)
+        return '\t'.join([sampleName, '|'.join([yGrep, x0Grep, x1Grep])])
+    except:
+        return '\t'.join([sampleName, 'Failed'])
+snpFiles = []
+if args.qcstat:
+    if not args.no_fqc:
+        os.system(' '.join(['multiqc', '-f', fqcDir, '-o', fqcDir, '-c', '/home/nicky/.multiqc_config.yaml']))
+    # if not os.path.exists("%s/all_snpOn.txt" %statsDir):
+    if os.path.exists(gvcfDir):
+        for vcfFile in os.listdir(gvcfDir): # collect SNP numbers at sexual chromosomes in gvcf
+            if '.tbi' not in vcfFile:
+                sample = vcfFile.split('.g.vcf.gz')[0].split('_')[0]
+                vcfDir = os.path.join(gvcfDir, vcfFile)
+                snpFiles.append(vcfDir)
+        if len(snpFiles) > 0:
+            snpPool = Pool(processes = args.task_num)
+            snpList = snpPool.map(calSNP, snpFiles)
+            snpPool.close()
+            snpPool.join()
+            if len(snpList) > 0:
+                with open(os.path.join(statsDir, 'all_snpOn.txt'), 'w') as snpStats:
+                    snpStats.write('\n'.join(snpList))
+##from nicky
+# if args.qcstat:
+    qcCmd = ['wht', 'qcstat', '-f', fqDir]
+    if args.mt:
+        qcCmd.append(" -mt")
+    qcCmdList = " ".join(qcCmd)
+    run('%s' %qcCmdList,task_num)
+if args.bed in ('WES', 'CES'):
+    FMdepthDir = os.path.join(depthDir,'FM')
+    checkdir(FMdepthDir)
+    run('mv %s/*-B* %s' %(depthDir, FMdepthDir),1)
+
+if args.anno:
+    checkdir(annoDir)
+    recalvcf = glob.glob('%s/*%s.raw.vcf.gz' %(vqsrDir,flag))
+    if len(recalvcf) > 0:
+        pool = Pool(processes = task_num)
+        pool.map(run_anno,recalvcf)
+        pool.close()
+        pool.join()
+    else:
+        rawvcf = []
+        for vcf in os.listdir(rawVcfDir):
+            # print(vcf)
+            if vcf.endswith('%s.raw.vcf.gz' %flag) and 'mito' not in vcf:
+                rawvcf.append(rawVcfDir + '/' + vcf)
+        # rawvcf = glob.glob('%s/*%s*.vcf.gz' %(rawVcfDir,flag))
+        if len(rawvcf) == 0:
+            print("can not find vcf file, please check")
+            sys.exit(2)
+        pool = Pool(processes = task_num)
+        pool.map(run_anno,rawvcf)
+        pool.close()
+        pool.join()
+##whs database anno from nicky
+    inHouseCmdList = []
+    inHouseCmd = ('wht', 'dbanno', '-f', resultsDir, '--omim', '--excel', '--local')
+    if args.bed in ('IDTEx', 'WES', 'IDP', 'IDT_PPGL', 'CES', 'WGS') or args.WES_mode:
+        inHouseCmd += ('--panel', '-fh')
+    elif args.bed in ('CYP21A2', 'CYP21A1P', 'HBB_cap', 'CYP17A1', 'GBA'):
+        inHouseCmd += ('-maf', '100')
+    elif args.bed in ('ag_fevr'):
+        inHouseCmd += ('-maf', '100', '--panel')
+    elif args.bed in ('chrMT'):
+        inHouseCmd += ('-maf', '100', '--no_filter')
+    else:
+        inHouseCmd += ('-maf', '100', '--no_filter')
+
+    for file in os.listdir(annoDir):
+        tmpCmd = list(inHouseCmd)
+        if '.hg38_multianno.txt' in file and flag in file and 'mitoAnno' not in file:
+            tmpCmd += ['-i', file]
+            inHouseCmdList.append(tmpCmd)
+        elif '.avinput' in file or file.endswith('.vcf'):
+            os.remove(os.path.join(annoDir, file))
+
+    if len(inHouseCmdList) > 0:
+        annoPool = Pool(processes = task_num)
+        annoPool.map(run_cmd, inHouseCmdList)
+        annoPool.close()
+        annoPool.join()
+
+if args.cbvcf:
+    if args.bed == "PA":
+        for ref in os.listdir("/workshop/project/paternity/Control/PA/"):
+            if not os.path.exists(gvcfDir + '/' + ref) and 'g.vcf.gz' in ref:
+                run('ln -s %s %s' %('/workshop/project/paternity/Control/PA/'+ref,gvcfDir))
+    gvcfList = []
+    gvcfStr = []
+    gvcf = glob.glob("%s/*.g.vcf.gz" %gvcfDir)
+    if args.cbvcf == 'all':
+        # gvcf = glob.glob("%s/*.g.vcf.gz" %gvcfDir)
+        for i in gvcf:
+            if "tbi" not in i :
+                gvcfStr.append(" -v " + i)
+        if len(gvcfStr) > 0:
+            gvcfList.append(gvcfStr)
+
+    else:
+        cbvcfList = args.cbvcf.split(",")
+        for i in cbvcfList:
+            gvcfStr = []
+            vcfarray = i.split("_")
+            for j in vcfarray:
+                for h in gvcf:
+                    if j in h:
+                        gvcfStr.append(" -v " + h)
+            if len(gvcfStr) > 1:
+                gvcfList.append(gvcfStr)
+    if len(gvcfList) > 0:
+        pool = Pool(processes = task_num)
+        pool.map(run_cbvcf,gvcfList)
+        pool.close()
+        pool.join()
+
+###from nicky
+if args.mt or args.bed == 'chrMT':
+    sampleText = os.path.join(resultsDir, 'samples.txt')
+    if not os.path.exists(sampleText):
+        mtVcfList = []
+        mtVcfStr = '.mitochondria.vcf.gz'
+        for mtVcf in os.listdir(rawVcfDir):
+            if mtVcf.endswith(mtVcfStr):
+                mtVcfList.append(mtVcf.split(mtVcfStr)[0])
+        with open(sampleText, 'w') as text:
+            text.write('\n'.join(mtVcfList))
+    run('python /workshop/ywu/scripts/mitomap/mitomap.py %s %s 2>%s/mitomap.log' %(sampleText, fqDir, logDir),task_num)
+    try:
+        subprocess.check_call('rm -rf ' + annoDir + '/*vcf ' + annoDir + '/*avinput', shell=True)
+        if args.bed == 'chrMT':
+            subprocess.check_call('mv ' + annoDir + '/*mitoAnno.hg19_mitomap.txt ' + resultsDir, shell=True)
+    except NameError:
+        pass
+
+### special process for specific project from nicky
+if args.sv:
+    if args.bed in ('IDTEx', 'WES', 'CES'):
+        sampleText = os.path.join(resultsDir, 'samples.txt')
+        if not os.path.exists(sampleText):
+            bamFilesList = []
+            for bam in os.listdir(dupDir):
+                if '.bam' in bam and '.bai' not in bam:
+                    bamFilesList.append(bam.split('.dedup.sorted.bam')[0])
+            with open(sampleText, 'w') as text:
+                text.write('\n'.join(bamFilesList))
+        
+    if args.bed in ('PA' ,'PA2', 'PAtest') and os.path.exists(gvcfDir):   # paternity project
+        for rawFile in os.listdir(rawVcfDir):
+            if '.tbi' not in rawFile:
+                # statCmd = ['wh-tools', 'varstat', '-f', resultsDir, '-i', rawFile, '-q', 'QC-report.txt', '-r', ' > ', logDir + '/varstat.log']
+                run('wht varstat -f %s -i %s -q QC-report.txt -r 2>%s/varstat.log' %(resultsDir,rawFile,logDir),task_num,fqDir)
+                # run_cmd(statCmd, fqDir)
+    elif not args.skip and (args.bed in ('IDTEx', 'WES', 'CES') or args.WES_mode):
+        # # samples list for multiple scripts written by ymwu
+        # SMN1/2 gene CNV process
+        smn_cnv_cmd = ['python', '/workshop/ywu/tools/SMNcnv/smn_cn_caller.py', resultsDir, sampleText, '2&> ', logDir + '/smn.log']
+        run_cmd(smn_cnv_cmd)
+
+        # stat qc and smn_cnv:
+        run_cmd(['python', '/home/nicky/snipt_code/stat-classify.py', resultsDir, os.path.join(resultsDir, 'QC-report.txt'), os.path.join(resultsDir, 'smncnv_results.txt'),'2&> ', logDir + '/smn.log'])
+
+        # cnv_xhmm process by nicky
+
+    if  args.xhmm and args.bed in ('IDTEx', 'WES', 'CES'):
+        cnvDir = os.path.join(resultsDir, 'cnv_xhmm')
+        checkdir(cnvDir)
+        # print (cnvDir)
+
+        if args.bed == 'CES':
+            refCNV = os.path.join("/storage/database/xhmm_ref/", 'CES')
+        else:
+            refCNV = os.path.join("/storage/database/xhmm_ref/", 'WES')
+        allBamList = []
+        for bamItem in os.listdir(dupDir):
+            if '.bam' in bamItem and '.bai' not in bamItem:
+                allBamList.append(os.path.join(dupDir, bamItem))
+        allBamArg = ' -i '.join(allBamList)
+        print(allBamArg)
+        run('sh /home/nicky/apps/wh-tools/src/WES/xhmm_run.sh %s %s %s %s "%s" >%s/xhmm.log'  %(dupDir, cnvDir, refCNV, xhmmintervals, allBamArg, logDir),task_num,cnvDir)
+
+    # LOH process: pipline by ywu
+    if args.loh:
+        lohDir = os.path.join(resultsDir, 'LOH')
+        checkdir(lohDir)
+        run('python /workshop/ywu/tools/LOH/LOH_pipeline.py %s %s %s %s 2>%s/loh.log' %(sampleText, dupDir, rawVcfDir, lohDir, logDir),task_num)
+
+    # clamms process: pipline by ywu
+    if  args.clamms:
+        chrBed = '/workshop/ywu/bed/IDT_hg19_windows.chr.bed'
+        noChrBed = '/workshop/ywu/bed/IDT_hg19_windows.nochr.bed'
+        if args.bed == 'CES':
+            chrBed = '/workshop/ywu/bed/MedExome_WHS_target.windows.chr.bed'
+            noChrBed = '/workshop/ywu/bed/MedExome_WHS_target.windows.nochr.bed'
+        clammsDir = os.path.join(resultsDir, 'cnv_clamms')
+        run('sh /workshop/ywu/tools/CNV/clamms_pipeline.sh  %s %s %s %s %s 2>%s/clamms.log' %(sampleText,dupDir,clammsDir,chrBed,noChrBed,logDir),task_num,resultsDir)
+        
+    if args.cnvkit and args.bed in ('CES', 'WES', 'WGS'):
+        checkdir(cnvkitDir)
+        bams = glob.glob('%s/*bam' %dupDir)
+        if len(bams) == 0:
+            print ('can not find dup bam for running cnvkit')
+            sys.exit(2)
+        pool = Pool(processes=10)
+        pool.map(run_cnvkit,bams)
+        pool.close()
+        pool.join()
+
+###from nicky
+if args.mail or args.ccmail:
+    end = time.time()
+    runTime = str(int((end - start)/60)) + "mins"
+    user = os.popen('echo $USER').read().strip()
+    mailList = Config.CFG['MAIL_LIST']['base'][0]
+    ccList = Config.CFG['MAIL_LIST']['base'][1]
+    if args.ccmail:
+        ccList += args.ccmail.split(',')
+    nowDate = datetime.datetime.now()
+    dateStr = str(nowDate.year) + str(nowDate.month) + str(nowDate.day)
+    mail_title = dateStr + '-' + str(args.bed) + ' 项目分析完成'
+    mail_content = "<p>Analysed By: " + user + "<br>Pipline运行了：" + runTime + "<br>结果路径：" + resultsDir + "</p>"
+    qcDir = os.path.join(resultsDir, 'QC-report.txt')
+    lowCov = os.path.join(resultsDir, 'low_cov_exons.list')
+    mail_footer = "<p>-----------------------------------------------------------------<br>" + \
+            "本邮件由系统自动发送，请勿回复！如有问题请联系相关负责人。</p>"
+    if os.path.exists(qcDir):
+        with open(qcDir, 'r') as content_file:
+            qcContent = content_file.read()
+        qcContent = qcContent.replace('\n', '</td></tr><tr><td>').replace('\t', '</td><td>')
+        mail_content += "<p><table style='width:100%'><tr><td>" + qcContent + "</td></tr></table></p>"
+    if args.bed in ("PA", "PA2"):
+        mail.SEND(dateStr + '-无创项目 QC 分析完成', mail_content + mail_footer, Config.CFG['MAIL_LIST']['patern'][0], Config.CFG['MAIL_LIST']['patern'][1])
+    if args.bed in ( "brca", "50gene", "tp53" ):
+        mailList += Config.CFG['MAIL_LIST']['health'][0]
+        ccList += Config.CFG['MAIL_LIST']['health'][1]
+    elif args.bed in ("CYP21A2", "CYP21A1P", "chrMT", "WES", "CES"):
+        mailList += Config.CFG['MAIL_LIST']['genetic'][0]
+        ccList += Config.CFG['MAIL_LIST']['genetic'][1]
+    elif args.bed in ("PA", "PA2"):
+        varPath = os.path.join(resultsDir, 'var-report.txt')
+        if os.path.exists(varPath):
+            with open(varPath, 'r') as text:
+                varContent = text.read().split('Reports')[0].split('0001S')[0]
+            varContent = varContent.replace('\n', '</td></tr><tr><td style="width:30px">').replace('\t', '</td><td>')
+        mail_content += "<p><table><tr><td>" + varContent + "</td></tr></table></p>"
+
+    mail_content += mail_footer
+    print (mail_title, mail_content, mailList, ccList)
+    if os.path.exists(lowCov):
+        mail.SEND(mail_title, mail_content, mailList, ccList, atts = [ lowCov ])
+    else:
+        mail.SEND(mail_title, mail_content, mailList, ccList)
+
+    print(mail_title, 'mail has been sent')  
+
+if args.db and os.path.exists(gvcfDir):
+    gvcfList = []
+    for gvcfItem in os.listdir(gvcfDir):
+        if '.g.vcf.gz' in gvcfItem and '.tbi' not in gvcfItem:
+            gvcfList.append(os.path.join(gvcfDir,gvcfItem))
+    gvcfListFile = os.path.join(resultsDir, 'vcfs.list')
+    with open(gvcfListFile, 'w') as gvcfText:
+        gvcfText.write('\n'.join(gvcfList))
+    projectName = fqDir.split('/')[-1]
+    tmpDir = os.path.join(resultsDir, 'tmp_db')
+    if os.path.exists(gvcfListFile):
+        dbLog = os.path.join(logDir, 'dbtools.log')
+        dbCmd = ['dbtools', 'pgvcf', '-l', gvcfListFile, '-p', projectName, '-o', tmpDir]
+        subprocess.Popen(dbCmd)
+    else:
+        print('no gvcf samples\' list')      
+

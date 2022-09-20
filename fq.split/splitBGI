@@ -1,0 +1,271 @@
+#!/bin/bash
+export LC_ALL='zh_CN.utf8'
+
+ARGS=`getopt -a -o i:B:b:o:m:rjcsh -l input:,barcode:,indexinfo:,outpath:,mode:,reverse,combine,cuta,splitlane,help -- "$@"`
+function usage() {
+    echo -e 'Usage : splitBGIfq.sh \n [-i] <fastq path,requied> \n [-B] <barcode.txt, requied> \n [-b] <Barcode information: startCycle,length,mismatchNum,separate with comma, example:200,10,1;210,10,1, default,SE:100,10,1> \n [-o] <output path, default split> \n [-m] <Sequencing mode, default SE> \n [-r] <Apply reverse complement of barcode sequence, default false> \n [-j] <combine,default false> \n [-c] <cut adapt,default false> \n [-s] <split data by each lane> \n'
+}
+[ $? -ne 0 ] && usage
+#set -- "${ARGS}"
+eval set -- "${ARGS}"
+while true
+do
+      case "$1" in
+      -i|--input)
+              input="$2"
+              shift
+              ;;
+      -B|--barcode)
+              barcode="$2"
+              shift
+              ;;
+      -b|--indexinfo)
+              indexinfo="$2"
+              shift
+              ;;
+      -o|--outpath)
+              outpath="$2"
+              shift
+              ;;
+      -m|--mode)
+              mode="$2"
+              shift
+              ;;
+      -r|--reverse)
+              reverse="yes"
+              ;;
+      -j|--combine)
+              Combine="yes"
+              ;;
+      -c|--cuta)
+              cuta="yes"
+              ;;
+      -s|--splitlane)
+              splitlane="yes"
+              ;;
+      -h|--help)
+              help="yes"
+              usage
+              #helpn="yes"
+              ;;
+      --)
+              #echo '-i and -b is requied!'
+              shift
+              break
+              ;;
+      esac
+shift
+done
+
+split(){
+
+        indexFile=$2
+        fqpath=$1
+        if [ $3 == "-r" ];then
+            rev="-r"
+        else
+            rev=""
+        fi
+        if [[ $4 =~ ':' ]];then
+            OLD_IFS="$IFS"
+            IFS=":"
+            indexarr=($4)
+            IFS="$OLD_IFS"
+            b1=${indexarr[0]//,/ }
+            b2=${indexarr[1]//,/ }
+            barcodeInfo="-b $b1 -b $b2"
+        else
+            b1=${4//,/ }
+            echo "SE bar $b1"
+            barcodeInfo="-b $b1"
+        fi
+            # indexstart=${indexarr[0]}
+            # indexlen=${indexarr[1]}
+            # mismatch=${indexarr[2]}
+        #echo $barcodeInfo
+        fqpath=${fqpath%'/'}
+        mkdir -p $fqpath/$6
+        #lane="$(cut -d'/' -f1 <<<"$fqpath")";
+        lane="$(echo $fqpath |rev |cut -d'/' -f 2 |rev)";
+        lanesplit=`basename $fqpath`
+        echo "$lanesplit"
+        echo "start spliting $lanesplit";
+
+        if [ $5 == "PE" ];then
+            #echo 'splitBarcode -B $indexFile -1 $fqpath/"$lane"_"$lanesplit"_read_1.fq.gz -2 $fqpath/"$lane"_"$lanesplit"_read_2.fq.gz -o $fqpath/$6 $3 -b $indexstart $indexlen $mismatch   --umi -t 50 -m 150'
+            splitBarcode -B $indexFile -1 $fqpath/"$lane"_"$lanesplit"_read_1.fq.gz -2 $fqpath/"$lane"_"$lanesplit"_read_2.fq.gz -o $fqpath/$6 $rev $barcodeInfo  --umi -t 50 -m 150
+        elif [ $5 == "SE" ];then
+            #echo 'splitBarcode -B $indexFile -1 $fqpath/"$lane"_"$lanesplit"_read_1.fq.gz -o $fqpath/$6 $3 -b $indexstart $indexlen $mismatch   --umi -t 50 -m 150'
+            splitBarcode -B $indexFile -1 $fqpath/"$lane"_"$lanesplit"_read.fq.gz -o $fqpath/$6 $rev $barcodeInfo  --umi -t 50 -m 150
+        else 
+            echo "Wrong Sequencing mode!"
+        exit 1
+        fi
+        #fastq-multx -B $indexFile $fqpath/"$lane"_"$lanesplit"_read_1.fq.gz $fqpath/"$lane"_"$lanesplit"_read_2.fq.gz  -o $fqpath/split/%.R2.fastq.gz -o $fqpath/split/%.R1.fastq.gz -e -t 50 -m $3 > $fqpath/split/QC."$lanesplit".report
+}
+export -f split
+
+cutada(){
+
+        input=$1
+        fq=$2
+        mkdir -p $input/combine/cut/
+        cutadapt -j 10 -l $3 $input/combine/$2_combined_R2.fastq.gz -o $input/combine/cut/$2_combined_R2.fastq.gz
+        wait 
+        mv -f  $input/combine/cut/$2_combined_R2.fastq.gz $input/combine/
+
+}
+export -f cutada 
+
+
+
+combine(){
+
+        input=$1
+        fq=$2
+        mkdir -p $input/combine/
+        if [ $3 == "SE" ];then
+            cat $input/L*/$4/*"$2".fq.gz > $input/combine/"$2"_combined_R1.fastq.gz
+        elif [ $3 == "PE" ];then
+            cat $input/L*/$4/*"$2"*_1.fq.gz > $input/combine/"$2"_combined_R1.fastq.gz
+            cat $input/L*/$4/*"$2"*_2.fq.gz > $input/combine/"$2"_combined_R2.fastq.gz
+        else
+            echo "combine wrong mode"
+            exit 1
+        fi
+
+}
+export -f combine
+
+input=${input%'/'}
+timeLog="拆分数据:"
+splitStart=`date +%s`
+#echo $mode
+if [ ! $help ];then
+  echo $Combine;
+  if [ $input ] && [ $barcode ];then
+    
+    echo "start spliting fq..."
+
+    ##默认参数设置
+    if [ $reverse ];then
+        reverse="-r"
+    else
+        reverse='""'
+    fi
+    #echo $mode
+    if [ $mode ];then
+        mode=$mode
+    else
+        mode="SE"
+    fi
+    #echo $mode
+    if [ $outpath ];then
+        outpath=$outpath
+    else
+        outpath="split"
+    fi
+    if [ $cuta ] && [ $mode == "SE" ];then
+        echo "wrong cut, please check!"
+        exit 1
+    fi
+    if [ $indexinfo ];then
+        indexinfo=$indexinfo
+    else
+        indexinfo="100,10,1"
+    fi 
+    
+    ##判断测序模式和输入参数是否匹配
+    input=${input%'/'}
+    fqpathname="$(echo $input |rev |cut -d'/' -f 1 |rev)"
+    if [ $mode == "SE" ];then
+        reads=`zcat $input/*L01*/"$fqpathname"_L01_read.fq.gz | head -2 | tail -1 `
+    else
+        reads=`zcat $input/*L01*/"$fqpathname"_L01_read_1.fq.gz | head -2 | tail -1 `
+    fi
+    R1len=${#reads}
+    if [ $mode == "SE" ];then
+        R2len="0"
+    else
+        OLD_IFS="$IFS"
+        IFS=","
+        indexarr=($indexinfo)
+        IFS="$OLD_IFS"
+        allcycle=${indexarr[0]}
+        R2len=$((allcycle-R1len))
+    fi
+    #echo $fqpathname
+    if [ $mode == "SE" ] && [ -f "$input/*L01*/"$fqpathname"_L01_read_2.fq.gz" ];then
+        echo "exist R2, Wrong index info,please check -b !"
+        exit 1
+    elif [ $mode == "SE" ] && [ $R1len != 110 ];then
+        echo "Wrong index info,please check -b !"
+        exit 1
+    fi
+    ##分4个线程对数据进行拆分
+    if [ $splitlane ];then
+      for i in $input/L*;do lane=`basename $i`; `grep "$lane" $barcode > "$i"/"$lane".barcode`;
+        parallel  --xapply  split ::: `for i in $i; do  echo  $i ; done` ::: "$i"/"$lane".barcode ::: $reverse ::: $indexinfo ::: $mode ::: $outpath &
+      done
+    else
+      parallel -j 4 --xapply  split ::: `for i in $input/L*; do  echo  $i ; done` ::: $barcode ::: $reverse ::: $indexinfo ::: $mode ::: $outpath    
+    fi
+    wait;
+    
+    ##统计拆分后的数据QC
+    BGIfqStat.pl $input/ $R1len $R2len $input/"$fqpathname".QC.summary.xls $outpath
+    sh /home/tianxl/pipeline/fq.split/txt2html.sh $input/"$fqpathname".QC.summary.xls $input/"$fqpathname".QC.summary.html
+    mail -s "$(echo -e "$fqpathname下机数据统计\nContent-Type: text/html")" lab@we-health.vip sx@we-health.vip yc@we-health.vip wensheng.yu@we-health.vip jingmin.yang@we-health.vip bin.hu@we-health.vip ky@we-health.vip < $input/"$fqpathname".QC.summary.html
+
+    splitend=`date +%s`
+    timeLog="$timeLog\n split运行了: $((splitend-splitStart))秒"
+    combStart=`date +%s`
+    ##合并多条Lane的数据(有多条Lane存在是使用)
+    if [ $Combine ];then
+        combStart=`date +%s`
+        echo "start combining fq..."
+        parallel -j 5 --xapply combine ::: $input ::: `awk '{print $NF}' $barcode| sort | uniq -c | awk '{print $2}'` ::: $mode ::: $outpath
+        if [ $mode == 'SE' ];then
+          cat $input/L*/$outpath/*undecoded.fq.gz > $input/combine/undecoded_R1.fastq.gz
+        elif [ $mode == "PE" ];then
+          cat $input/L*/$outpath/*undecoded_1.fq.gz > $input/combine/undecoded_R1.fastq.gz
+          cat $input/L*/$outpath/*undecoded_2.fq.gz > $input/combine/undecoded_R2.fastq.gz
+        else
+          echo "combine wrong mode"
+          exit 1
+        fi
+        wait;
+        rm -r $input/L*/$outpath
+        combEnd=`date +%s`
+        timeLog="$timeLog\n combine运行了:$((combEnd-combStart))秒"
+    fi
+    wait;
+
+    ##主要针对tell文库中有生产文库的样本，切掉R2末端的18个碱基(index),tell文库样本保留
+    if [ $cuta ] && [ $mode == "PE" ] && [ $Combine ];then
+        cutaStart=`date +%s`
+        echo "start cutting adapter"
+        OLD_IFS="$IFS"
+        IFS=","
+        indexarr=($indexinfo)
+        IFS="$OLD_IFS"
+        allcycle=${indexarr[0]}
+        R2len=$((allcycle-R1len))
+        parallel -j 20 --xapply cutada ::: $input ::: `grep -v 'tell' $barcode | awk '{print $1}'` ::: $R2len
+        wait;
+        cutaEnd=`date +%s`
+        timeLog="$timeLog\n cuta运行了:$((cutaEnd-cutaStart))秒"
+    elif [ $cuta ];then
+        echo "Wrong cut, please check!"
+    fi
+    sumtime=`date +%s`
+    timeLog="$timeLog\n 总共运行了:$((sumtime-splitStart))秒"
+    echo -e $timeLog >> $input/time.log
+  else
+    echo 'Error : -i and -B is requied!'
+    usage
+    exit 1
+  fi
+fi
+wait;
+

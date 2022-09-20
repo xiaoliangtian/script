@@ -1,0 +1,11 @@
+R:ag
+Y:CT
+M:AC
+K:GT
+S:gc
+W:AT
+H:atc
+B:gtc
+V:gac
+D:GAT
+N:ATgc

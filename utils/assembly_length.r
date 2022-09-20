@@ -1,0 +1,13 @@
+#Date:2015/10/15
+args<-commandArgs(T)
+a<-read.table(args[1],header=FALSE,sep="\t")
+tag<-ifelse(length(args)==2,args[2],'gene')
+pdfname<-paste(tag,'Length.pdf',sep=".")
+options(scipen=9999999)
+pdf(pdfname,height=5,onefile=FALSE)
+par(mar=c(5,3.5,3,2),mgp=c(2.5,0.6,0),xpd=T)
+bar<-barplot(a[,2],ylim=c(0,1.1*max(a[,2])),cex.lab=0.5,cex.axis=0.7,names.arg=a[,1],las=2,cex.names=0.7,space=0.9,col="#4A7EBB",xaxt="n",main=paste("Distribution of ",tag," length",sep=""))
+text(bar+0.2,-0.4,labels=a[,1],srt=60,adj=1.2,cex=.7)
+text(bar,a[,2],labels=a[,2],adj=c(0.5,0),cex=0.5,pos=3)
+box()
+dev.off()

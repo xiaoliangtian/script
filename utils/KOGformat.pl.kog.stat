@@ -1,0 +1,25 @@
+A	0	RNA processing and modification	orange3
+B	0	Chromatin structure and dynamics	maroon
+C	0	Energy production and conversion	RoyalBlue4
+D	0	Cell cycle control, cell division, chromosome partitioning	AntiqueWhite1
+E	0	Amino acid transport and metabolism	DodgerBlue1
+F	0	Nucleotide transport and metabolism	SkyBlue3
+G	0	Carbohydrate transport and metabolism	Blue1
+H	0	Coenzyme transport and metabolism	LightBlue1
+I	0	Lipid transport and metabolism	Cyan3
+J	0	Translation, ribosomal structure and biogenesis	gold1
+K	0	Transcription	DarkOrange1
+L	0	Replication, recombination and repair	DarkOrange3
+M	0	Cell wall/membrane/envelope biogenesis	PeachPuff3
+N	0	Cell motility	MediumPurple1
+O	0	Posttranslational modification, protein turnover, chaperones	PaleGreen1
+P	0	Inorganic ion transport and metabolism	MediumPurple4
+Q	0	Secondary metabolites biosynthesis, transport and catabolism	aquamarine4
+R	0	General function prediction only	gray90
+S	0	Function unknown	gray70
+T	0	Signal transduction mechanisms	tomato1
+U	0	Intracellular trafficking, secretion, and vesicular transport	DeepPink
+V	0	Defense mechanisms	pink
+W	0	Extracellular structures	green
+Y	0	Nuclear structure	yellow
+Z	0	Cytoskeleton	red

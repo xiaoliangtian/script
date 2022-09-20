@@ -1,0 +1,1 @@
+samtools mpileup -Q 0   -t DP,AD --max-idepth 1000000 -l /opt/seqtools/bed/yunzhong.bed  --max-depth 1000000 -uvf /opt/seqtools/gatk/ucsc.hg19_beifen.fasta YZ-T31_S8.sorted.bam YZ-T32_S9.sorted.bam YZ-T34_S10.sorted.bam YZ-T33_S15.sorted.bam    | bcftools call -Ac   -o YZ-T31.vcf1

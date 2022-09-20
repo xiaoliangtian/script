@@ -1,0 +1,26 @@
+* {
+    font-family: "Calibri",Helvetica;
+}
+caption{
+    font-weight:700;
+}
+.xls {
+    table-layout: fixed;
+    border-collapse:collapse;
+    margin: 0 50px 50px 50px;
+}
+.xls td, th {
+/*    text-overflow: ellipsis;
+    white-space: nowrap;
+    overflow: hidden;*/
+    word-break: break-all;
+    word-wrap: break-word;
+    border: 1px solid #98bf21;
+    padding: 3px 7px 2px 7px;
+}
+.xls th {
+    padding-top: 5px;
+    padding-bottom: 4px;
+    background-color: #A7C942;
+    color: #ffffff;
+}

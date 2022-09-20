@@ -1,0 +1,301 @@
+#!/usr/bin/env python
+# coding=utf-8
+__author__ = ''
+__version__ = '1.0.1'
+__date__ = '2020/09/03'
+import sys, argparse, os, glob, subprocess, sys, re, time
+sys.path.append("/home/tianxl/pipeline/modules/")
+import configparser,codecs,locale
+import subprogram3
+from functools import  partial
+from multiprocessing import Pool,Queue,Process
+paths = os.path.dirname(os.path.realpath(__file__))
+
+start = time.time()
+parser = argparse.ArgumentParser(description='MGI fq split',epilog='It is used for fq split of MGI')
+parser.add_argument('--version', action='version', version='%(prog)s 2.0')
+
+Pipe = parser.add_argument_group('Pipeline')
+Pipe.add_argument('-i','--input',required = True, help='fastq path')
+Pipe.add_argument('-B','--Barcode',required = True, help='barcode file')
+Pipe.add_argument('-b','--indexInfo',default="100,10,1",help='index info (example:200,10,1:210,10,1)')
+Pipe.add_argument('--nosplit',action="store_true",default=False,help='skip split step')
+Pipe.add_argument('-o',default="split",help="split output path")
+Pipe.add_argument('-m','--mode',default="SE:100",help='seq mode (example:PE:100+100')
+Pipe.add_argument('-r',action="store_true",default=False,help="index reverse or not")
+Pipe.add_argument('--fqstat',action="store_true",help='fq stat')
+Group = Pipe.add_mutually_exclusive_group()
+Group.add_argument('-com','--combine',action="store_true",default=False,help="combine all split lane or not")
+Group.add_argument('-mv','--move',action='store_true',default=False,help='mv split L01 or not,only L01')
+Pipe.add_argument('-s','--splitlane',action="store_true",default=False,help="split data by each lane or not")
+Pipe.add_argument('-t','--thread',type=int,default=50,help="maximum threads")
+Pipe.add_argument('--memory',type=int,default=100,help="maximum memory")
+Pipe.add_argument('--mail',action="store_true",default=False,help="email or not")
+#Anno = parser.add_argument_group('Annotation')
+#ORF = Anno.add_mutually_exclusive_group()
+args = parser.parse_args()
+
+run = subprogram3.run
+checkfile = subprogram3.checkfile
+checkdir = subprogram3.checkdir
+pdf2png = subprogram3.pdf2png
+utils = '%s/../utils' %paths
+current = os.path.realpath('./')
+maxThread = args.thread
+maxMemory = args.memory
+
+os.putenv("LANG", "en_US.UTF-8")
+os.putenv("LC_ALL", "en_US.UTF-8")
+# run("os.environ['LC_ALL'] = 'en_US.UTF-8'")
+# run("export LC_ALL='zh_CN.utf8'")
+# run('sh /storage/raw_data/2020/export.sh')
+
+inputpath = args.input
+inputpathList = inputpath.split(",")
+timeLog = []
+
+barFile = args.Barcode
+barcodeFile =  barFile
+indexInfo = "-b " + args.indexInfo.replace(',',' ').replace(':',' -b ')
+output = args.o
+mode = args.mode.split(":")[0]
+if mode == "SE":
+    R1len = args.mode.split(":")[1]
+    R2len = 0
+elif mode == "PE":
+    R1len = args.mode.split(":")[1].split("+")[0]
+    R2len = args.mode.split(":")[1].split("+")[1]
+else:
+    print ("Wrong Sequencing mode")
+    sys.exit(2)
+
+if args.r:
+    rev = "-r"
+else:
+    rev = ""
+
+lanesFq = []
+for i in  inputpathList:
+    lanes = os.listdir(i)
+    for path in lanes:
+        if os.path.isdir(i + '/' + path) and 'L' in path:
+            lanesFq.append(i.strip("/") + '/' + path)
+        else:
+            pass
+# print(lanesFq)
+runLaneList = []
+for run1 in inputpathList:
+    runLane = run1.strip("/").split("/")[-1]
+    runLaneList.append(runLane)
+# print(runLaneList)
+# runLaneCom = '_'.join(runLaneList)
+
+def run_split(lane):
+    fqpath = lane.strip("/")
+    runlane = fqpath.strip("/").split("/")[-2]
+    lane1 = fqpath.strip("/").split("/")[-1]
+    # print(fqpath,runlane,lane1)
+    if args.splitlane:
+        run('grep "%s" %s > %s/%s.barcode' %(lane1,barcodeFile,fqpath,lane1))
+        if mode == 'SE':
+            run('splitBarcode -B %s/%s.barcode -1 %s/%s_%s_read.fq.gz -o %s/%s %s %s  --umi -t %s -m %s' %(fqpath,lane1,fqpath,runlane,lane1,fqpath,output,rev,indexInfo,maxThread,maxMemory),5)
+        elif mode == 'PE':
+            run('splitBarcode -B %s/%s.barcode -1 %s/%s_%s_read_1.fq.gz -2 %s/%s_%s_read_2.fq.gz -o %s/%s %s %s  --umi -t %s -m %s' %(fqpath,lane1,fqpath,runlane,lane1,fqpath,runlane,lane1,fqpath,output,rev,indexInfo,maxThread,maxMemory),4)
+        else:
+            print ("Wrong Sequencing mode")
+            sys.exit(2)
+    else:
+        if mode == 'SE':
+            run('splitBarcode -B %s -1 %s/%s_%s_read.fq.gz -o %s/%s %s %s  --umi -t %s -m %s' %(barcodeFile,fqpath,runlane,lane1,fqpath,output,rev,indexInfo,maxThread,maxMemory),4)
+        elif mode == 'PE':
+            #run('print(test)')
+            run('splitBarcode -B %s -1 %s/%s_%s_read_1.fq.gz -2 %s/%s_%s_read_2.fq.gz -o %s/%s %s %s  --umi -t %s -m %s' %(barcodeFile,fqpath,runlane,lane1,fqpath,runlane,lane1,fqpath,output,rev,indexInfo,maxThread,maxMemory),4)
+        else:
+            print ("Wrong Sequencing mode")
+            sys.exit(2)
+if not args.nosplit:
+    pool = Pool(processes = 4)
+    pool.map(run_split, lanesFq)
+    pool.close()
+    pool.join()
+for k in inputpathList:
+    rawfqPath = inputpathList[0]
+    runlane = k.strip("/").split("/")[-1]
+    if not args.nosplit or args.fqstat:
+        run('BGIfqStat.pl %s %s %s %s/%s.QC.summary.xls %s' %(k,R1len,R2len,k,runlane,output))
+        run('sh /home/tianxl/pipeline/fq.split/txt2html.sh %s/%s.QC.summary.xls %s/%s.QC.summary.html' %(k,runlane,k,runlane))
+    if args.mail:
+        # title = runlane + '下机数据统计'
+        # title = unicode(title,'GBK').encode('UTF-8')
+        # run('echo "数据地址:%s/%s/combine" `cat %s/%s.QC.summary.html`| mail -s "$(echo -e "%s\nContent-Type:text/html")" lab@we-health.vip sx@we-health.vip yc@we-health.vip wensheng.yu@we-health.vip wentao.li@we-health.vip jingmin.yang@we-health.vip bin.hu@we-health.vip ky@we-health.vip  qiong.qin@we-health.vip hui.ye@we-health.vip yf@we-health.vip' %(current,rawfqPath,k,runlane,runlane))
+        # run('mail -s "$(echo -e "%s\nContent-Type: text/html")" lab@we-health.vip sx@we-health.vip yc@we-health.vip wensheng.yu@we-health.vip wentao.li@we-health.vip jingmin.yang@we-health.vip bin.hu@we-health.vip ky@we-health.vip  qiong.qin@we-health.vip hui.ye@we-health.vip yf@we-health.vip< %s/%s.QC.summary.html' %(runlane,k,runlane))
+        # run('mail -s "$(echo -e "%s\nContent-Type: text/html")" xiaoliang.tian@we-health.vip < %s/%s.QC.summary.html' %(runlane,k,runlane))
+        run('sh /storage/raw_data/2020/export.sh %s/%s/combine %s/%s.QC.summary.html %s' %(current,rawfqPath,k,runlane,runlane))
+
+splitEnd = time.time()
+splitRun = 'splitRun' + ':' + str(round((splitEnd - start)/60 ,2)) + 'mins'
+timeLog.append(splitRun)
+
+def run_combine(sample):
+    inputpath = inputpathList[0]
+    # checkdir("%s/combine" %inputpath)
+    combinePath = inputpath + '/' + 'combine'
+    if args.combine:
+        if sample not in sampleList.keys():
+            fqList = []
+            if  mode == 'SE':
+                for i in inputpathList:
+                    fq = '%s/L*/%s/*%s.fq.gz' %(i,output,sample)
+                    fqList.append(fq)
+                fqAll = " ".join(fqList)
+                run('cat %s > %s/%s_combined_R1.fastq.gz' %(fqAll,combinePath,sample),5)
+            elif mode == 'PE':
+                for i in inputpathList:
+                    fq1 = '%s/L*/%s/*%s_1.fq.gz' %(i,output,sample)
+                    fqList.append(fq1)
+                fq1All = " ".join(fqList)
+                fq2All = fq1All.replace("_1.fq.gz","_2.fq.gz")
+                run('cat %s > %s/%s_combined_R1.fastq.gz' %(fq1All,combinePath,sample),5)
+                run('cat %s > %s/%s_combined_R2.fastq.gz' %(fq2All,combinePath,sample),5)
+            else:
+                print ("Wrong Sequencing mode!")
+                sys.exit(2)
+        else:
+            fqList = []
+            if  mode == 'SE':
+                for i in inputpathList:
+                    fq = '%s/L*/%s/*%s-split*.fq.gz' %(i,output,sample)
+                    fqList.append(fq)
+                fqAll = " ".join(fqList)
+                run('cat %s > %s/%s_combined_R1.fastq.gz' %(fqAll,combinePath,sample),5) 
+            elif mode == 'PE':
+                for i in inputpathList:
+                    fq1 = '%s/L*/%s/*%s-split*_1.fq.gz' %(i,output,sample)
+                    fqList.append(fq1)
+                fq1All = " ".join(fqList)
+                fq2All = fq1All.replace("_1.fq.gz","_2.fq.gz")
+                run('cat %s > %s/%s_combined_R1.fastq.gz' %(fq1All,combinePath,sample),5)
+                run('cat %s > %s/%s_combined_R2.fastq.gz' %(fq2All,combinePath,sample),5)
+            else:
+                print ("Wrong Sequencing mode!")
+                sys.exit(2)     
+    elif args.move:
+        if sample not in sampleList.keys():
+            fqList = []
+            if  mode == 'SE':
+                for i in inputpathList:
+                    fq = '%s/L01/%s/*%s.fq.gz' %(i,output,sample)
+                    fqList.append(fq)
+                fqAll = " ".join(fqList)
+                run('mv %s  %s/%s_combined_R1.fastq.gz' %(fqAll,combinePath,sample),5)
+            elif mode == 'PE':
+                for i in inputpathList:
+                    fq1 = '%s/L01/%s/*%s_1.fq.gz' %(i,output,sample)
+                    fqList.append(fq1)
+                fq1All = " ".join(fqList)
+                fq2All = fq1All.replace("_1.fq.gz","_2.fq.gz")
+                run('mv %s  %s/%s_combined_R1.fastq.gz' %(fq1All,combinePath,sample),5)
+                run('mv %s  %s/%s_combined_R2.fastq.gz' %(fq2All,combinePath,sample),5)
+            else:
+                print ("Wrong Sequencing mode!")
+                sys.exit(2)
+        else:
+            fqList = []
+            if  mode == 'SE':
+                for i in inputpathList:
+                    fq = '%s/L01/%s/*%s-split*.fq.gz' %(i,output,sample)
+                    fqList.append(fq)
+                fqAll = " ".join(fqList)
+                run('cat %s > %s/%s_combined_R1.fastq.gz' %(fqAll,combinePath,sample),5) 
+            elif mode == 'PE':
+                for i in inputpathList:
+                    fq1 = '%s/L01/%s/*%s-split*_1.fq.gz' %(i,output,sample)
+                    fqList.append(fq1)
+                fq1All = " ".join(fqList)
+                fq2All = fq1All.replace("_1.fq.gz","_2.fq.gz")
+                run('cat %s > %s/%s_combined_R1.fastq.gz' %(fq1All,combinePath,sample),5)
+                run('cat %s > %s/%s_combined_R2.fastq.gz' %(fq2All,combinePath,sample),5)
+            else:
+                print ("Wrong Sequencing mode!")
+                sys.exit(2)     
+
+global sampleList
+sampleList = {}
+if  args.combine or args.move:
+    inputpath = inputpathList[0]
+    checkdir("%s/combine" %inputpath)
+    samples = []
+    with open(barcodeFile,'r') as file:
+        lines = file.readlines()
+        for line in lines:
+            lineInfo = line.strip().split("\t")
+            if  '-split' not in lineInfo[0]:
+                samples.append(lineInfo[0])
+            else:
+                sample = lineInfo[0].split("-split")[0]
+                if sample not in sampleList.keys():
+                    sampleList[sample] = []
+                sampleList[sample].append(lineInfo[0])
+                if sample not in samples and sample is not None :
+                    samples.append(sample)
+    pool = Pool(processes = 5)
+    pool.map(run_combine, samples)
+    pool.close()
+    pool.join()
+    combinePath = inputpathList[0] + '/' + 'combine'
+    fqList = []
+    if args.combine:
+        if mode == 'SE':
+            for i in inputpathList:
+                fq = '%s/L*/%s/*undecoded.fq.gz' %(i,output)
+                fqList.append(fq)
+            fqAll = " ".join(fqList)
+            run('cat %s > %s/undecoded_combined_R1.fastq.gz' %(fqAll,combinePath),5)
+        elif mode == "PE":
+            for i in inputpathList:
+                fq1 = '%s/L*/%s/*undecoded_1.fq.gz' %(i,output)
+                fqList.append(fq1)
+            fq1All = " ".join(fqList)
+            fq2All = fq1All.replace("_1.fq.gz","_2.fq.gz")
+            run('cat %s > %s/undecoded_combined_R1.fastq.gz' %(fq1All,combinePath),5)
+            run('cat %s > %s/undecoded_combined_R2.fastq.gz' %(fq2All,combinePath),5)
+        else:
+            print ("Wrong Sequencing mode!")
+            sys.exit(2) 
+    elif args.move:
+        if mode == 'SE':
+            for i in inputpathList:
+                fq = '%s/L*/%s/*undecoded.fq.gz' %(i,output)
+                fqList.append(fq)
+            fqAll = " ".join(fqList)
+            run('mv %s  %s/undecoded_combined_R1.fastq.gz' %(fqAll,combinePath),5)
+        elif mode == "PE":
+            for i in inputpathList:
+                fq1 = '%s/L*/%s/*undecoded_1.fq.gz' %(i,output)
+                fqList.append(fq1)
+            fq1All = " ".join(fqList)
+            fq2All = fq1All.replace("_1.fq.gz","_2.fq.gz")
+            run('mv %s  %s/undecoded_combined_R1.fastq.gz' %(fq1All,combinePath),5)
+            run('mv %s  %s/undecoded_combined_R2.fastq.gz' %(fq2All,combinePath),5)
+        else:
+            print ("Wrong Sequencing mode!")
+            sys.exit(2)
+    for i in inputpathList:
+        run('rm -r %s/L*/%s/*.gz' %(i,output),5)
+
+end = time.time()
+combineRun = 'combineRun' + ':' + str(round((end - splitEnd)/60, 2)) + 'mins' 
+timeLog.append(combineRun)
+runTime = 'pipelineRun' + ':' + str(round((end - start)/60, 2)) + 'mins'
+timeLog.append(runTime)
+
+with open(inputpathList[0] + '/time.log', 'w') as f:
+    timeOut = "\n".join(timeLog)
+    f.write(timeOut)
+
+
+
+
+
+
+

@@ -1,0 +1,295 @@
+#!/usr/bin/env python
+# coding=utf-8
+__author__ = ''
+__version__ = '1.0.1'
+__date__ = '2019/06/30'
+import sys, argparse, os, glob, subprocess, sys, re
+configDir = '/opt/seqtools/source/wh-tools/src'
+sys.path.append(configDir)
+from modules.MySqlConn import Mysql
+import configparser
+import subprogram3
+from functools import  partial
+from multiprocessing import Pool,Queue,Process
+paths = os.path.dirname(os.path.realpath(__file__))
+
+
+parser = argparse.ArgumentParser(description='RNAAP(RNA-seq Analysis Pipeline) by Nieh Hsiaoting',epilog='It is used for comprehensive transcriptome analysis')
+parser.add_argument('--version', action='version', version='%(prog)s 2.0')
+
+Pipe = parser.add_argument_group('Pipeline')
+Pipe.add_argument('-r','--Rename',action='store_true',help='rename raw fastq')
+Pipe.add_argument('-q','--QC',action='store_true',help='run Trimmomatic to quality trim reads')
+Transcriptome = Pipe.add_mutually_exclusive_group()
+Transcriptome.add_argument('-cf',metavar='cdna',default='/home/tianxl/database/hg19/hs37d5/v2/hs37d5.fasta',help='transcripts nucleic acid fasta [File]')
+Pipe.add_argument('-m','--Mapping',action='store_true',help='run Bowtie2 Mapping to transcripts')
+Pipe.add_argument('-e','--Express',action='store_true',help='run SAMtools to Estimate Abundance')
+Pipe.add_argument('-rd','--Dedup',action='store_true',help='remove duplicate seq')
+Pipe.add_argument('-cnv','--Callcnv',action='store_true',help='run cnvkit to call cnv')
+Pipe.add_argument('-b',metavar='bins',help='select bin')
+Pipe.add_argument('-t',metavar='type',help='project type')
+Pipe.add_argument('-bb',metavar='backupbins',help='backup bins')
+Pipe.add_argument('-pro',metavar='process',help='task num')
+Pipe.add_argument('-rb','--rmbins',action='store_true',help='remove bad bins')
+Pipe.add_argument('-cfg',metavar='config',default='%s/CNV_analyse.ini' %paths,help='configfile,default %s/CNV_analyse.ini' %paths)
+#Anno = parser.add_argument_group('Annotation')
+#ORF = Anno.add_mutually_exclusive_group()
+args = parser.parse_args()
+
+config = configparser.ConfigParser()
+config.read(args.cfg)
+cg = config.get
+run = subprogram3.run
+checkfile = subprogram3.checkfile
+checkdir = subprogram3.checkdir
+pdf2png = subprogram3.pdf2png
+utils = '%s/../utils' %paths
+current = os.path.realpath('./')
+gofile, keggfile = '', ''
+
+proList=[]
+OutFile = 'project.list'
+
+mysql = Mysql()
+
+fqDir = './'
+if args.Rename:
+    for file in os.listdir(fqDir):
+        if '.fastq.gz.raw' in file:
+            pass
+        elif '_R1.fastq.gz' in file:
+            fileName = file.split('.')[0].split('_')[0]
+        elif '_R1_001.fastq.gz' in file:
+            fileName = file.split('.')[0].split('_')[0]
+        else:
+            fileName = ''
+
+        if fileName:
+            sample_num = '__00' + fileName.split('-')[1]
+            query = "SELECT 家系编号 fam_code, 检测项目 project, 外部条码 barcode FROM sample.total WHERE 条形码 like '" + sample_num + "'"
+            queryRes = mysql.getAll(query)
+            if queryRes:
+                famCode = queryRes[0]['fam_code'].decode('utf-8')
+                project = queryRes[0]['project'].decode('utf-8')
+                barcode = queryRes[0]['barcode'].decode('utf-8')
+                #print(famCode,project)
+                newFileName = famCode + '[' + fileName.split('-')[1] + ']'
+                print(fileName, newFileName)
+                os.system(' '.join(['rename', fileName, newFileName, fileName+'*']))
+                #regex_str = "[\u4E00-\u9FA5]+目"
+                regex_str = "项目"
+                match_obj = re.match(regex_str,project)
+                projectNum = project[-1]
+                #print(project,match_obj,projectNum)
+                if match_obj:
+                    proList.append(newFileName + '_' + file.split('.')[0].split('_')[1] + '\t' + 'project' + projectNum)
+                else:
+                    proList.append(newFileName + '_' + file.split('.')[0].split('_')[1] + '\t' + 'others' + '\t' + barcode)
+            else:
+                print('can\'t find this code in database:', fileName)
+    result = '\n'.join(proList)
+    #result = result.decode()
+    with open(OutFile, "w") as text_file:
+        text_file.write(result)
+
+mysql.dispose()
+
+# Run Trimmomatic to quality trim reads
+if args.QC is True:
+    print ('# Run Trimmomatic to quality trim reads')
+    run('rename _001.fastq.gz .fastq.gz *') 
+    if len(glob.glob('*_R1.fastq.gz')) == 0:
+        print ('can NOT find raw fastq file, please check')
+        sys.exit(2)
+    run('perl %s/QC_pro.pl -a %s -k -f -o QC.xls' %(utils, cg('QC','adaptor')))
+
+    checkdir('result/QC/RawData')
+    checkdir('result/QC/QCTable')
+    checkdir('result/QC/QCReport')
+    run('mv QC.xls result/QC/QCTable/')
+    for i in glob.glob('*.clean_1.fq_fastqc'):
+        run('mv %s/Images/per_base_gc_content.png result/QC/QCReport/%s.per_base_gc_content.png' %(i, i[:-18]))
+        run('mv %s/Images/per_base_quality.png result/QC/QCReport/%s.per_base_quality.png' %(i, i[:-18]))
+        run('mv %s/Images/per_sequence_quality.png result/QC/QCReport/%s.per_sequence_quality.png' %(i, i[:-18]))
+
+# run Trinity for RNA-Seq De novo Assembly
+left = glob.glob('*.clean_1.fq')
+right = glob.glob('*.clean_2.fq')
+
+if args.cf is not None:
+    print ('# Finding Reference file')
+    checkfile(args.cf)
+    print ('# the Reference file is found, WILL NOT do Assembly')
+    #run('ln -sf %s contig.fa' %(os.path.abspath(args.cf)))
+
+if args.b:
+    print ('# Finding Bin')
+    need_type = args.b
+    need_type = need_type.split('_')[0]
+    bin = 'binMeth=' + '%s' %(cg('bins',args.b))
+    print (bin)
+
+if args.t:
+   print ('# Finding Type')
+   project = args.t
+
+if args.pro:
+   task_num = int(args.pro)
+else:
+   task_num = int(0) 
+    
+
+#print (left)
+def run_cmd(fq):
+    fq_name = fq[:-11]
+    #print(fq_name)
+    run('bowtie2 -x %s  --rg-id %s --rg "PL:ILLUMINA" --rg "SM:%s" -U  %s.clean_1.fq   %s  -p %s | grep -E "^\@|XS\:" - |  samtools sort -@ %s  - -o %s.srt.bam' %(contig,fq_name,fq_name,fq_name,cg('Mapping','bowtie2_parameter'),cg('Mapping','threads'),cg('samtools','threads'),fq_name),task_num)
+    #run('samtools index %s.srt.bam' %fq_name)
+    #run('samtools idxstats %s.srt.bam >%s.srt.bam.stat' %(fq_name,fq_name))
+
+def run_dedup(bam):
+    bam = bam[:-8]
+    run('java -XX:ParallelGCThreads=1 -jar /opt/seqtools/source/picard.jar MarkDuplicates I=%s.srt.bam O=%s.dedup.sorted.bam M=%s.metrics REMOVE_DUPLICATES=true AS=true' %(bam,bam,bam),task_num)
+    run('samtools index %s.srt.bam' %bam,task_num)
+    run('samtools idxstats %s.srt.bam >%s.srt.bam.stat' %(bam,bam),task_num)
+    run('samtools index %s.dedup.sorted.bam' %bam,task_num)
+    run('samtools idxstats %s.dedup.sorted.bam >%s.dedup.sorted.bam.stat' %(bam,bam),task_num)
+    run('bamToBed -i %s.dedup.sorted.bam | gzip - > %s.dedup.sorted.bam.bed.gz' %(bam,bam),task_num)
+    
+# run Bowtie2 Mapping to Transcripts
+if args.Mapping is True:
+    print ('# run Bowtie2 Mapping to Transcripts')
+    #checkfile('contig.fa')
+    if len(left) == 0:
+        print ('can not find clean fastq file, please check')
+        sys.exit(2)
+    if args.cf is not None and os.path.isfile('%s.1.bt2' %args.cf):
+        contig = args.cf
+    else:
+        if not os.path.isfile('contig.fa.1.bt2'):
+            print ('## can not find config fasta bowtie2-index file, will creat it')
+            run('bowtie2-build contig.fa contig.fa')
+        contig = 'contig.fa'
+    #global run_cmd
+    pool = Pool(processes = task_num)
+    pool.map(run_cmd, left)
+    #print (res)
+    pool.close()
+    pool.join()
+    #for fq in left:
+	#fq_name = fq[:-11]
+        #run('bowtie2 -x %s -1 %s.clean_1.fq -2 %s.clean_2.fq  %s  -p %s  | samtools view -bS - -o %s.sam.bam' %(contig,fq_name,fq_name,cg('Mapping','bowtie2_parameter'),cg('Mapping','threads'),fq[:-11]))
+    run('perl %s/mapping_stat.pl Mapping.xls' %paths)
+    
+    checkdir('result/Mapping')
+    run('mv Mapping.xls result/Mapping/')
+
+# run SAMtools to Estimate Abundance
+if args.Dedup is True:
+    bams = glob.glob('*.srt.bam')
+    if len(bams) == 0:
+        print ('can not find bowtie2 mapping result bam file, please check')
+        sys.exit(2)
+    pool = Pool(processes = task_num)
+    pool.map(run_dedup, bams)
+    pool.close()
+    pool.join()
+        
+    checkdir('CNV')
+    run('mv *.dedup.sorted.bam.bed.gz CNV/')
+
+def run_callCnv(project, projectNum):
+    if project in redHouse.keys() and redHouse[project] != "": 
+        run('sh /home/tianxl/pipeline/CNV-seq/cnvkit_pip.sh %s %s %s' %(project,projectNum,redHouse[project]),task_num)
+    else:
+        run('sh /home/tianxl/pipeline/CNV-seq/cnvkit_pip.sh %s %s' %(project,projectNum),task_num)
+
+project1 = []
+project2 = []
+project3 = []
+others = []
+redHouse = {}
+if args.Callcnv is True:
+    print ('# run cnvkit to call cnv')
+    checkfile('project.list')
+    with open(OutFile, "r") as projectLists:
+        for projectList in projectLists:
+            #print(projectList)
+            projectLn = projectList.strip().split('\t')
+            if len(projectLn) >1 and projectLn[1] == 'project1':
+                project1.append(projectLn[0])
+            elif len(projectLn) >1 and (projectLn[1] == 'project2'):
+                project2.append(projectLn[0])
+            elif len(projectLn) >1 and (projectLn[1] == 'project3'):
+                project3.append(projectLn[0])
+            elif len(projectLn)==3:
+                redHouse[projectLn[0]] = projectLn[2]
+                others.append(projectLn[0])
+            else:
+                others.append(projectLn[0])
+        projectLists.close()
+    if len(project1)>0:
+        pool = Pool(processes = 1)
+        pool.map(partial(run_callCnv,projectNum = 'project1'), project1)
+        pool.close()
+        pool.join()
+    if len(project2)>0:
+        pool = Pool(processes = task_num)
+        pool.map(partial(run_callCnv,projectNum = 'project2'), project2)
+        pool.close()
+        pool.join()
+    if len(project3)>0:
+        pool = Pool(processes = task_num)
+        pool.map(partial(run_callCnv,projectNum = 'project3'), project3)
+        pool.close()
+        pool.join()        
+    if len(others)>0:  
+        pool = Pool(processes = 1)
+        pool.map(partial(run_callCnv,projectNum = 'others'), others)
+        pool.close()
+        pool.join()      
+
+# run gingko to call cnv
+if args.b:
+    print ('# run gingko to call cnv')
+    file = '%s/CNV' %(current)
+    os.chdir  (file)
+    run('ls *bed.gz | grep bed.gz > list')
+    run('cp %s/config.example ./' %(utils))
+    run("sed -i 's/binMeth\=.*/%s/' config.example" %bin)
+    if args.rmbins:
+        run("sed -i 's/rmbadbins\=0/rmbadbins\=1/' config.example")
+    run('/home/tianxl/soft/ginkgo_v2/scripts/analyze.sh %s/CNV > gingko.log' %current)	
+    #run('cd CNV/')
+if args.t:
+    print ('# run ginkgo to call cnv step2')
+    if args.t and not args.b:
+        need_type = args.bb
+    file = '%s/CNV' %(current)
+    os.chdir  (file)
+    types = glob.glob('*.dedup.sorted.bam.txt')
+    if len(types) == 0:
+        print ('cannot find gingko result txt file, please check')
+        sys.exit(2)
+    if not project :
+        print ('don\'t know project type, please check')
+        sys.exit(2)
+    for type in types:
+        type_name = type[:-21]
+        run('perl %s/gingko2cnv_v3.pl %s/%s.%s.noneed SegBreaks %s.dedup.sorted.bam.txt %s.qianhe %s.point SegCopy %s.cnv %s.point.all CNV1 %s' %(utils,utils,project,need_type,type_name,type_name,type_name,type_name,type_name,project))
+        if args.t == 'NIPT':
+            run('python %s/NIPT_result.py %s.qianhe %s > %s.NIPT.result' %(utils,type_name,cg('ref','NIPT_ref'),type_name))
+            checkdir('result/NIPT')
+            run('cp %s.NIPT.result result/NIPT/' %type_name)
+        run('perl %s/pos2band.pl %s.cnv > %s.band' %(utils,type_name,type_name))
+        run("awk '{print $2\":\"$3\"-\"$4}' %s.band | sed 's/^/chr/' - > %s.intervals" %(type_name,type_name))
+        pse = '%s/pseq.sh' %utils
+        p = subprocess.Popen(['sh', pse, type_name ])
+        p.communicate()
+        run('python %s/cnv-annotated.py %s.intervals %s.loci' %(utils,type_name,type_name))
+        run('paste %s.band %s.intervals.result > %s.band_gene_v2.xls' %(type_name,type_name,type_name))
+        run('perl %s/gingkoCNV_filter.pl %s.band_gene_v2.xls %s.CNV.filter.xls' %(utils,type_name,type_name))
+        checkdir('result/CNV')
+        run('cp %s.pdf %s.CNV.filter.xls result/CNV/' %(type_name,type_name))
+
+

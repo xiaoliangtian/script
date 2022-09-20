@@ -1,0 +1,83 @@
+#/bin/bash
+date_start=$(date +%s);
+
+#for i in *.dedup.sorted.bam;do echo $i ;done > list
+#sed -i 's/.dedup.sorted.bam//' list
+
+if [ -f  list1 ];then
+mkdir -p project1/analyse/pic
+mkdir -p project1/result
+
+for j in `cat list1`; do
+	cd project1
+	ln -s ../"$j"*dedup.sorted.bam* ./
+        h=${j//-/.}
+        ln -s ../CNV/$h*.point ./
+        #Rscript /home/tianxl/pipeline/utils/SC.R $h*.point $h*.point
+done
+cd project1
+else 
+mkdir -p analyse/pic
+mkdir -p result
+#mv *point.pdf result/
+fi
+
+#cd project1
+for i in *.dedup.sorted.bam;do echo $i ;done > list
+sed -i 's/.dedup.sorted.bam//' list
+
+##Set the number of threads
+thread_num=$1;
+tempfifo="my_temp_fifo"
+mkfifo ${tempfifo}
+exec 6<>${tempfifo}
+rm -f ${tempfifo}
+for ((i=1;i<=${thread_num};i++))
+do
+{
+    echo "start $i..."
+}
+done >&6
+for i in `cat list`; do 
+ { read -u6
+   { sleep 1
+	h=${i//./-}
+	cnvkit.py batch $i.dedup.sorted.bam -r /workshop/project/SA/ref/yikang_2_ref_v3_190612/ref_100K/my_reference_100K.cnn   -d analyse/ -p 10
+	wait 
+	cd analyse/
+	perl /home/tianxl/pipeline/CNV-seq/cnvkit2type_v2.pl $i.dedup.sorted.cns $i.type $i.qianhe > $i.cnv
+        perl /home/tianxl/pipeline/CNV-seq/cnvkit2point.pl $i.dedup.sorted.cnr $i.cnv $i.point
+        perl /home/tianxl/pipeline/CNV_analyse/../utils/pos2band.pl "$i".cnv > "$i".band
+        perl /home/tianxl/pipeline/CNV_analyse/../utils/pos2band.pl "$i".type > "$i".all.band
+        awk '{print $2":"$3"-"$4}' "$i".all.band | sed 's/^/chr/' - > $i.all.intervals
+        pseq . loc-intersect --group refseq --locdb /data/hg19/pseq_data/locdb --file $i.all.intervals --out $i.all --noweb
+        python /home/tianxl/pipeline/CNV_analyse/../utils/cnv-annotated.py $i.all.intervals $i.all.loci
+        paste "$i".all.band  "$i".all.intervals.result > pic/"$i".all.band_gene_v2.xls
+        awk '{print $2":"$3"-"$4}' "$i".band | sed 's/^/chr/' - > $i.intervals
+        awk '{print $2"\t"$3"\t"$4}' "$i".band | sed '/start/d' - > pic/$i.bed
+        pseq . loc-intersect --group refseq --locdb /data/hg19/pseq_data/locdb --file $i.intervals --out $i --noweb
+        python /home/tianxl/pipeline/CNV_analyse/../utils/cnv-annotated.py $i.intervals $i.loci
+        paste "$i".band  "$i".intervals.result > pic/"$i".band_gene_v2.xls
+        mv $i.point pic/
+        rm "$i".band $i.intervals "$i".intervals.result $i.loci $i.log $i.all.loci $i.all.log "$i".all.intervals.result "$i".all.band $i.all.intervals 
+        cd pic
+	###add v2        
+        Rscript /home/tianxl/pipeline/CNV-seq/cnv_annotation.R $i.bed
+        paste "$i".band_gene_v2.xls $i.cnv_anno.txt > $i.band_gene_v2.cnv_anno.xls
+        ###
+        #perl /home/tianxl/pipeline/CNV-seq/result2lastType.pl $i.band_gene_v2.cnv_anno.xls $i.cnv_anno.xls
+        perl /home/tianxl/pipeline/CNV-seq/result2lastType_v2.pl $i.band_gene_v2.cnv_anno.xls $i.cnv_anno.xls
+        #Rscript /home/tianxl/pipeline/CNV-seq/cnv_anno.tab.R $i.band_gene_v2.xls        
+        #perl /home/tianxl/pipeline/CNV-seq/result2lastType.pl $i.band_gene_v2.cnv_anno.xls $i.cnv_anno.xls
+        perl /home/tianxl/pipeline/CNV-seq/single_cnv_v2.pl $i.band_gene_v2.xls $i.point
+     echo "done!">&6
+  }& 
+}
+done
+wait
+for i in *point; do Rscript /home/tianxl/pipeline/utils/SC.R $i $i ;done
+mv *point.pdf result/
+cd analyse/pic/
+for i in *X*;do Rscript /home/tianxl/pipeline/CNV-seq/single_chr.R $i $i ;done
+mv *X*.pdf *.all.band_gene_v2.xls *.cnv_anno.xls ../*qianhe  ../../result/
+rm ../../result/*v2.cnv_anno.xls

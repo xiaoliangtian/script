@@ -1,0 +1,1 @@
+sh /opt/seqtools/source/arriba_v1.1.0/run_arriba.sh /opt/seqtools/source/arriba_v1.1.0/STAR_index_hs37d5_GENCODE19/  /opt/seqtools/source/arriba_v1.1.0/GENCODE19.gtf  /opt/seqtools/source/arriba_v1.1.0/hs37d5.fa  /opt/seqtools/source/arriba_v1.1.0/database/blacklist_hg19_hs37d5_GRCh37_2018-11-04.tsv.gz $1 $2 20

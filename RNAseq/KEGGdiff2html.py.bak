@@ -1,0 +1,156 @@
+#!/usr/bin/env python
+__author__ = 'Nie Xiaoting'
+__version__ = '1.0.1'
+__date__='2015/05/21'
+__doc__="""The program used for creat enrich pathway html"""
+
+'''Nieh 2016/01/27 1.2.0 arrange the file for html output '''
+
+import sys,urllib,time,os,re
+from HTMLParser import HTMLParser
+# http://www.kegg.jp/kegg-bin/show_pathway?<mapid>/default%3d<dcolor>/<keggid.n>%09<bgcolor>,<fgcolor>/
+if len(sys.argv) != 4:
+    print '%s: DEG_KEGGEnrich.gene koidinmap stat.html' % sys.argv[0]
+    sys.exit(2)
+
+class parselinks(HTMLParser):
+    def __init__(self):
+        self.coords={}
+        self.img=''
+        HTMLParser.__init__(self)
+    def handle_starttag(self,tag,attrs):
+        if tag =='area':
+            areadict={}
+            if len(attrs) == 0:
+                pass
+            else:
+                for name,value in attrs:
+                    areadict[name]=value
+                values=[areadict[name] for name in ('coords','shape','href','title')]
+                self.coords[values[0]]=values[1:]
+        if tag=='img':
+            if len(attrs) == 0:
+                pass
+            else:
+                for name,value in attrs:
+                    if name=='src' and value.startswith('/tmp/'):
+                        self.img=value
+
+def DownloadImg(url,dirs):
+    try:
+        socket=urllib.urlopen(url)
+    except:
+        print "can not open the url %s" %url
+    names=url.split('/')[-1]
+    if os.path.exists(dirs)==False:
+        os.makedirs(dirs)
+    fimg=open(os.path.join(dirs,names),"wb")
+    fimg.write(socket.read())
+    fimg.close()
+
+homo={}
+fhomo=open(sys.argv[2],'rU')
+for line in fhomo:
+    word=line.rstrip().split('\t')
+    mapid='map'+word[0].split()[0]
+    if mapid not in homo:
+        homo[mapid]={}
+    if word[-1][0]=='K':
+        kohomo=re.findall('(K\d{5})',word[-1])
+        for koid in kohomo:
+            if koid not in homo[mapid]:
+                homo[mapid][koid]={}
+            homo[mapid][koid][kohomo[0]]=1
+
+eccolor={}
+genecolor={}
+kocolor={}
+map2gene={}
+DG=sys.argv[1].split('.DEG')[0]
+dirs=DG+'.map'
+
+fkgdiff=open(sys.argv[1],'rU')
+for line in fkgdiff.readlines()[1:]:
+    word=line.rstrip().split('\t')
+    mapid='map'+word[5].split()[0]
+    result='%s(%s)' %(word[0],word[6])
+
+    if word[5] not in map2gene:
+        map2gene[word[5]]={}
+    map2gene[word[5]][result]=1
+
+    if word[6]=='up':
+        fgcolor='red'
+    else:
+        fgcolor='blue'
+
+    if word[1] not in genecolor:
+        genecolor[word[1]]={}
+    genecolor[word[1]][word[0]]=fgcolor
+
+    if mapid not in kocolor:
+        kocolor[mapid]={}
+    if word[1] not in kocolor[mapid]:
+        kocolor[mapid][word[1]]=fgcolor
+    else:
+        if kocolor[mapid][word[1]]!=fgcolor:
+            kocolor[mapid][word[1]]='magenta'
+
+    if mapid not in eccolor:
+        eccolor[mapid]={}
+    if word[1] in homo[mapid]:
+        for ecid in homo[mapid][word[1]]:
+            if ecid not in eccolor[mapid]:
+                eccolor[mapid][ecid]=fgcolor
+            else:
+                if eccolor[mapid][ecid]!=fgcolor:
+                    eccolor[mapid][ecid]='magenta'
+
+fst=open(sys.argv[3],'w')
+fst.write('<html>\n<!--\nAuthor      Nieh Hsiaoting\nCopyright   (c)www.hanyubio.com\nContact     next1014@gmail.com\n-->\n')
+fst.write('<head>\n <meta http-equiv="content-type" content="text/html; charset=utf-8">\n <link rel="stylesheet" href="kegg.css" type="text/css">\n <title>KEGG pathway statistic</title>\n</head>\n<body>\n')
+fst.write(' <table class="xls" align="center">\n  <caption>Pathway annotation of %s</caption>\n' %DG)
+fst.write('  <tr>\n   <th>#Pathway</th>\n   <th>DEG genes involved in the pathway</th>\n  </tr>\n')
+for l3 in map2gene:
+    mid,pathway=l3.split(' ',1)
+    fst.write('<tr>\n   <td><a href="%s/map%s.html">%s</td>\n   <td>%s</td>\n  </tr>\n' %(dirs,mid,pathway,';'.join(map2gene[l3].keys())))
+fst.write(' </table>\n</body>\n</html>\n')
+fst.close()
+
+keggurl='http://www.kegg.jp'
+for mapid in eccolor:
+    if os.path.exists(dirs)==False:
+        os.makedirs(dirs)
+    fout=open(os.path.join(dirs,mapid+'.html'),'w')
+    fout.write('<html>\n<!--\nAuthor      Nieh Hsiaoting\nCopyright   (c)www.hanyubio.com\nContact     next1014@gmail.com\n-->\n')
+    fout.write('<head>\n <meta http-equiv="content-type" content="text/html; charset=utf-8">\n <script type="text/javascript" src="../kegg.js"></script>\n')
+    mapurl='%s/kegg-bin/show_pathway?%s/default%%3dpink/' %(keggurl,mapid)
+    for ecid in eccolor[mapid]:
+        mapurl+='%s%%09,%s/' %(ecid,eccolor[mapid][ecid])
+    # print mapurl
+    html=parselinks()
+    html.feed(urllib.urlopen(mapurl).read())
+    DownloadImg(keggurl+html.img,dirs)
+    time.sleep(3)
+    fout.write(' <title>%s</title>\n</head>\n<body>\n' %mapid)
+    # width: 50%;
+    fout.write('<div id="popup" style="position: absolute; border: 1px solid black; opacity: 0.95; font-size: 12px; padding-right: 10px; background-color: white;"></div>\n')
+    fout.write('<img src="%s.png" name="pathwayimage" usemap="#mapdata" border="0">\n\n<map name="mapdata">\n' %mapid)
+    for coords in html.coords:
+        shape,href,title=html.coords[coords]
+        area='shape="%s" coords="%s" href="%s%s" title="%s"' % (shape,coords,keggurl,href,title)
+        onmouseover=''
+        if title[0]=='K':
+            kohomo=re.findall('(K\d{5})',title)
+            for koid in kohomo:
+                if koid in kocolor[mapid]:
+                    if kocolor[mapid][koid]=='magenta':
+                        a=';'.join(['<span style=\\"color: %s\\">%s</span>' %(genecolor[koid][gene],gene) for gene in genecolor[koid]])
+                    else:
+                        a=';'.join(genecolor[koid].keys())
+                    onmouseover+='<li style=\\"color: %s\\">%s: %s</li>' %(kocolor[mapid][koid],koid,a)
+        if onmouseover:
+            area+=' onmouseover=\'javascript: showInfo("<ul><li>Gene<ul>%s</ul></li></ul>");\'' %(onmouseover)
+            # area+=' onmouseover=\'javascript: showInfo("<ul><li style=\\"color: %s\\">Gene<ul>%s</ul></li></ul>");\'' %(eccolor[mapid][kohomo[0]],onmouseover)
+        fout.write('<area %s>\n' %area)
+    fout.write('</map>\n</body>\n</html>\n')

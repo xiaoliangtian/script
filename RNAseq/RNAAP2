@@ -1,0 +1,404 @@
+#!/usr/bin/env python
+__author__ = 'Nieh Hsiaoting'
+__version__ = '1.0.1'
+__date__ = '2015/10/09'
+import sys, argparse, os, glob, subprocess
+import ConfigParser
+import subprogram
+paths = os.path.dirname(os.path.realpath(__file__))
+
+'''Nieh 2015/10/09 1.0.1 put all parameter into config file '''
+'''Nieh 2016/01/27 1.2.0 arrange the file for html output '''
+
+parser = argparse.ArgumentParser(description='RNAAP(RNA-seq Analysis Pipeline) by Nieh Hsiaoting',epilog='It is used for comprehensive transcriptome analysis',version='%(prog)s 1.2.0')
+
+Pipe = parser.add_argument_group('Pipeline')
+Pipe.add_argument('-q','--QC',action='store_true',help='run Trimmomatic to quality trim reads')
+Transcriptome = Pipe.add_mutually_exclusive_group()
+Transcriptome.add_argument('-a','--Assembly',action='store_true',help='run Trinity for RNA-Seq De novo Assembly')
+Transcriptome.add_argument('-cf',metavar='cdna',help='transcripts nucleic acid fasta [File]')
+Pipe.add_argument('-m','--Mapping',action='store_true',help='run Bowtie2 Mapping to transcripts')
+Pipe.add_argument('-e','--Express',action='store_true',help='run SAMtools to Estimate Abundance')
+Pipe.add_argument('-r','--ROQA',action='store_true',help='RNAseq Overall Quality Assessment,include SaturationCurve,CoveragePie and UniformDistribution')
+Pipe.add_argument('-c',metavar='correlation',help='correlation coefficient(R2) comparison order (example:A1/A2,B1/B2)')
+Pipe.add_argument('-d',metavar='deg',help='differential expression analysis comparison order (example:A/B,C/D,A_B/C_D)')
+Pipe.add_argument('-f',metavar='fliter',help='transcripts functional annotation file and location (example:Anotation.final,8)')
+Pipe.add_argument('-n','--Enrichment',action='store_true',help='DEG GO and KEGG Enrichment')
+Pipe.add_argument('-cfg',metavar='config',default='%s/RNAAP.ini' %paths,help='configfile,default %s/RNAAP.ini' %paths)
+Anno = parser.add_argument_group('Annotation')
+ORF = Anno.add_mutually_exclusive_group()
+ORF.add_argument('-p','--Predict',action='store_true',help='run EMBOSS "getorf" Find and Extract Open Reading Frames')
+ORF.add_argument('-pf',metavar='pep',help='protein amino acid fasta [File]')
+GO = Anno.add_mutually_exclusive_group()
+GO.add_argument('-g','--GO',action='store_true',help='run interProScan for Gene Onthology analysis')
+GO.add_argument('-gf',metavar='go',help='geneid2go [File]')
+KEGG = Anno.add_mutually_exclusive_group()
+KEGG.add_argument('-k',metavar='KAAS',help='KAAS queryname and email and type (example:abc,abc@mail.com,H)')
+KEGG.add_argument('-kf',metavar='kegg',help='KEGG.format [File]')
+Addi = parser.add_argument_group('Additional')
+Addi.add_argument('--ssr',action='store_true',help='run MISA to identificat ssr')
+Addi.add_argument('--snp',action='store_true',help='run Bcftools to identificat snp')
+Addi.add_argument('--scatter',action='store_true',help='plot DEA scatter')
+Addi.add_argument('--volcano',action='store_true',help='plot DEA volcano')
+Addi.add_argument('--heatmap',action='store_true',help='plot Heatmap')
+Addi.add_argument('--venn',action='store_true',help='plot DEG Venn picture')
+Addi.add_argument('--pathway',action='store_true',help='get Enriched Pathway picture')
+Pref= parser.add_argument_group('Prefer')
+Pref.add_argument('--log',action='store_true',help='Prefer use log value over RPKM for heatmap plot')
+Pref.add_argument('--gms',action='store_true',help='Prefer use GeneMarkS over getorf for amino acid predict, Used for Prokaryotic')
+
+args = parser.parse_args()
+config = ConfigParser.ConfigParser()
+config.read(args.cfg)
+cg = config.get
+run = subprogram.run
+checkfile = subprogram.checkfile
+checkdir = subprogram.checkdir
+pdf2png = subprogram.pdf2png
+utils = '%s/../utils' %paths
+current = os.path.realpath('./')
+gofile, keggfile = '', ''
+
+if args.f is not None and len(args.f.split(',')) != 2:
+    print 'the f(fliter) parameter is wrong,example:Anotation.final,8'
+    sys.exit(2)
+
+if args.k is not None and len(args.k.split(',')) != 3:
+    print 'the k(KAAS) parameter is wrong,example:abc,abc@mail.com,H'
+    sys.exit(2)
+
+if args.Enrichment is True and (args.kf is None and args.k is None and args.gf is None and args.GO is not True):
+    print 'Can not find GO and KEGG annotation file or process, please check'
+    sys.exit(2)
+
+# Run Trimmomatic to quality trim reads
+if args.QC is True:
+    print '# Run Trimmomatic to quality trim reads'
+    if len(glob.glob('*.raw_1.fq')) == 0:
+        print 'can NOT find raw fastq file, please check'
+        sys.exit(2)
+    run('perl %s/QC.pl -a %s -f -o QC.xls' %(utils, cg('QC','adaptor')))
+
+    checkdir('result/QC/RawData')
+    checkdir('result/QC/QCTable')
+    checkdir('result/QC/QCReport')
+    run('mv QC.xls result/QC/QCTable/')
+    for i in glob.glob('*.clean_1.fq_fastqc'):
+        run('mv %s/Images/per_base_gc_content.png result/QC/QCReport/%s.per_base_gc_content.png' %(i, i[:-18]))
+        run('mv %s/Images/per_base_quality.png result/QC/QCReport/%s.per_base_quality.png' %(i, i[:-18]))
+        run('mv %s/Images/per_sequence_quality.png result/QC/QCReport/%s.per_sequence_quality.png' %(i, i[:-18]))
+
+# run Trinity for RNA-Seq De novo Assembly
+left = glob.glob('*.clean_1.fq')
+right = glob.glob('*.clean_2.fq')
+if args.Assembly is True:
+    print '# run Trinity for RNA-Seq De novo Assembly'
+    if len(left) == 0:
+        print 'can NOT find clean fastq file, please check'
+        sys.exit(2)
+    if len(right) == 0:
+        run('%s --seqType fq --full_cleanup --min_kmer_cov %s --max_memory %s --CPU %s --output %s --single %s' %(cg('Assembly','trinty_path'),cg('Assembly','min_kmer_cov'),cg('Assembly','max_memory'),cg('Assembly','CPU'),cg('Assembly','output'),','.join(left)), 0, 'assembly.log')
+    else:
+        run('%s --seqType fq --full_cleanup --min_kmer_cov %s --max_memory %s --CPU %s --output %s --left %s --right %s' %(cg('Assembly','trinty_path'),cg('Assembly','min_kmer_cov'),cg('Assembly','max_memory'),cg('Assembly','CPU'),cg('Assembly','output'),','.join(left),','.join(right)), 0, 'assembly.log')
+    run('perl %s/Trinity_stat.pl %s.Trinity.fasta contig.fa TrinityStat.xls' %(paths,cg('Assembly','output')))
+    run('Rscript %s/assembly_length.r %s.Trinity.fasta.dis Transcripts' %(utils,cg('Assembly','output')))
+    pdf2png('Transcripts.Length')
+    run('Rscript %s/assembly_length.r contig.fa.dis Unigene' %utils)
+    pdf2png('Unigene.Length')
+
+    checkdir('result/Assembly/Trinity')
+    checkdir('result/Assembly/TrinityStat')
+    run('ln -sf %s/contig.fa result/Assembly/Trinity/' %current)
+    run('mv %s.Trinity.fasta result/Assembly/Trinity/Trinity.fasta' %(cg('Assembly','output')))
+    run('mv TrinityStat.xls Transcripts.Length.pdf Transcripts.Length.png Unigene.Length.pdf Unigene.Length.png result/Assembly/TrinityStat/')
+
+if args.cf is not None:
+    print '# Finding Reference file'
+    checkfile(args.cf)
+    print '# the Reference file is found, WILL NOT do Assembly'
+    run('ln -sf %s contig.fa' %(os.path.abspath(args.cf)))
+
+# run EMBOSS "getorf" Find and Extract Open Reading Frames
+if args.Predict is True:
+    print '# run EMBOSS "getorf" Find and Extract Open Reading Frames'
+    checkfile('contig.fa')
+    if args.gms is not True:
+        run('perl %s/getorf.pl contig.fa cds.fa pep.fa' %paths)
+    # else:
+    #     run('')
+
+    checkdir('result/Annotation/Predict')
+    run('ln -sf %s/cds.fa %s/pep.fa result/Annotation/Predict/' %(current,current))
+
+if args.pf is not None:
+    print '# Finding Reference protein file'
+    checkfile(args.pf)
+    print '# the Reference protein file is found, WILL NOT do Predict'
+    run('ln -sf %s pep.fa' %(os.path.abspath(args.pf)))
+
+# run interProScan for Gene Ontology analysis
+if args.GO is True:
+    print '# run interProScan for Gene Onthology analysis'
+    checkfile('pep.fa')
+    gopid = run('perl %s/GOanno.pl pep.fa' %utils, 1)
+
+# run KAAS for KEGG pathway analysis
+if args.k is not None:
+    print '# run KAAS for KEGG pathway analysis'
+    checkfile('pep.fa')
+    qname,email,types= args.k.split(',')
+    jobid = run('python %s/KAAS.py pep.fa %s %s' %(utils,email,qname)).strip()
+    keggpid = run('python %s/KEGGformat.py KEGG.format -j %s -e %s -t %s -s kegg.count' %(utils,jobid,email,types), 1)
+
+# run MISA to identificat ssr
+if args.ssr is True:
+    print '# run MISA to identificat ssr'
+    checkfile('contig.fa')
+    run('perl %s/SSR.pl contig.fa %s %s' % (utils,cg('SSR','definition'),cg('SSR','interruptions')), 1)
+
+    checkdir('result/GeneStruct/SSR')
+    run('ln -sf %s/contig.fa.misa result/GeneStruct/SSR/SSR.xls' %current)
+
+# run Bowtie2 Mapping to Transcripts
+if args.Mapping is True:
+    print '# run Bowtie2 Mapping to Transcripts'
+    checkfile('contig.fa')
+    if len(left) == 0:
+        print 'can not find clean fastq file, please check'
+        sys.exit(2)
+    if args.cf is not None and os.path.isfile('%s.1.bt2' %args.cf):
+        contig = args.cf
+    else:
+        if not os.path.isfile('contig.fa.1.bt2'):
+            print '## can not find config fasta bowtie2-index file, will creat it'
+            run('bowtie2-build contig.fa contig.fa')
+        contig = 'contig.fa'
+    for fq in left:
+        run('bowtie2 -x %s -U %s %s -p %s | samtools view -bS - -o %s.sam.bam' %(contig,fq,cg('Mapping','bowtie2_parameter'),cg('Mapping','threads'),fq[:-11]))
+    run('perl %s/mapping_stat.pl Mapping.xls' %paths)
+
+    checkdir('result/Mapping')
+    run('mv Mapping.xls result/Mapping/')
+
+# run SAMtools to Estimate Abundance
+if args.Express is True:
+    print '# run SAMtools to Estimate Abundance'
+    bams = glob.glob('*.sam.bam')
+    if len(bams) == 0:
+        print 'can not find bowtie2 mapping result bam file, please check'
+        sys.exit(2)
+    for bam in bams:
+        if not os.path.isfile('%s.srt.bam' %bam):
+            run('samtools sort -@ %s -m %s %s %s.srt' %(cg('samtools','threads'),cg('samtools','sort_memory'),bam,bam))
+        run('samtools index %s.srt.bam' %bam)
+        run('samtools idxstats %s.srt.bam >%s.srt.bam.stat' %(bam,bam))
+    run('perl %s/express.pl GeneExpress.xls' %paths)
+
+    checkdir('result/GeneExpress')
+    run('ln -sf %s/GeneExpress.xls result/GeneExpress/' %current)
+
+# RNAseq Overall Quality Assessment and SNP analysis
+if args.ROQA is True or args.snp is True:
+    print '# RNAseq Overall Quality Assessment and SNP analysis'
+    checkfile('contig.fa')
+    bams = glob.glob('*.sam.bam')
+    if len(bams) == 0:
+        print 'can not find bowtie2 mapping result bam file, please check'
+        sys.exit(2)
+    if not os.path.isfile('contig.fa.fai'):
+        print '## can NOT find contig fasta index file, will creat it'
+        run('samtools faidx contig.fa')
+    for bam in bams:
+        if not os.path.isfile('%s.srt.bam' %bam):
+            print '## can NOT find sorted bam file, will creat it'
+            run('samtools sort -@ %s -m %s %s %s.srt' %(cg('samtools','threads'),cg('samtools','sort_memory'),bam,bam))
+
+        if args.ROQA is True:
+            run('perl %s/saturation.pl %s %s.dis' %(paths,bam,bam[:-4]))
+            run('Rscript %s/curve.r %s.dis %s.Saturation Depth of sequencing,Gene count detected' %(utils,bam[:-4],bam[:-8]))
+            pdf2png('%s.SaturationCurve' %bam[:-8])
+
+            run('genomeCoverageBed -ibam %s.srt.bam -g contig.fa.fai > %s.srt.bam.bed' %(bam,bam))
+            run('perl %s/coverage.pl %s.srt.bam.bed %s.srt.bam.bed.cov' %(paths,bam,bam))
+            run('Rscript %s/pie.r %s.srt.bam.bed.cov %s.Coverage' %(utils,bam,bam[:-8]))
+            pdf2png('%s.CoveragePie' %bam[:-8])
+
+            run('genomeCoverageBed -ibam %s.srt.bam -g contig.fa.fai -bga > %s.srt.bam.bga.bed' %(bam,bam))
+            run('perl %s/uniformdis.pl %s.srt.bam.bga.bed contig.fa.fai %s.srt.bam.bga.bed.cov' %(paths,bam,bam))
+            run("Rscript %s/curve.r %s.srt.bam.bga.bed.cov %s.UniformDis percentile of geneBody,Coverage depth" %(utils,bam,bam[:-8]))
+            pdf2png('%s.UniformDisCurve' %bam[:-8])
+
+        if args.snp is True:
+            run('samtools mpileup -uIf contig.fa %s.srt.bam |/home/assembly/samtools-0.1.19/bcftools/bcftools view -cg - |/home/assembly/samtools-0.1.19/bcftools/vcfutils.pl varFilter -Q %s -d %s -a %s > %s.vcf' %(bam,cg('SNP','min_qual'),cg('SNP','min_read_depth'),cg('SNP','min_alt_base'),bam[:-8]))
+
+    if args.ROQA is True:
+        checkdir('result/ROQA/SaturationCurve')
+        run('mv *.SaturationCurve.pdf *.SaturationCurve.png result/ROQA/SaturationCurve/')
+        checkdir('result/ROQA/CoveragePie')
+        run('mv *.CoveragePie.pdf  *.CoveragePie.png result/ROQA/CoveragePie/')
+        checkdir('result/ROQA/UniformDisCurve')
+        run('mv *.UniformDisCurve.pdf *.UniformDisCurve.png result/ROQA/UniformDisCurve/')
+
+    if args.snp is True:
+        run('perl %s/samtools_SNP.pl SNP' %paths)
+        run('Rscript %s/barbeside.r SNP.plot SNP' %utils)
+        pdf2png('SNP')
+
+        checkdir('result/GeneStruct/SNP')
+        run('mv SNP.xls SNPStat.xls result/GeneStruct/SNP/')
+        run('mv SNP.pdf SNP.png result/GeneStruct/SNP/')
+
+# correlation coefficient (R2 test)
+if args.c is not None:
+    print '# run correlation coefficient (R2 test)'
+    checkfile('GeneExpress.xls')
+    run('Rscript %s/correlation.r GeneExpress.xls %s' %(paths,args.c))
+    for i in glob.glob('*.vs.*.Correlation.pdf'):
+        pdf2png(i[:-4])
+
+    checkdir('result/ROQA/Correlation')
+    run('mv *.vs.*.Correlation.pdf *.vs.*.Correlation.png result/ROQA/Correlation/')
+
+# Use DEGseq for differential expression analysis
+if args.d is not None:
+    print '# Use DEGseq for differential expression analysis'
+    checkfile('GeneExpress.xls')
+    run('Rscript %s/DEGseq.r GeneExpress.xls %s' %(paths,args.d))
+
+# Fliter the DEGseq result
+if args.f is not None:
+    print '# Fliter the DEGseq result'
+    checkfile('GeneExpress.xls')
+    if (len(glob.glob('*.vs.*.DEGseq'))) == 0:
+        print 'can NOT find DEGseq result floder (*.vs.*.DEGseq),please check'
+        sys.exit(2)
+    run('perl %s/DEA.pl -a %s -c GeneExpress.xls -l %s -r %s -p %s -q %s -o DEGsStat.xls' %(paths,args.f,cg('DEA','log'),cg('DEA','RPKM'),cg('DEA','pvalue'),cg('DEA','qvalue')))
+
+    checkdir('result/DiffExprAnalysis/DEGseq')
+    checkdir('result/DiffExprAnalysis/DEGsStat')
+    run('ln -sf %s/*.vs.*.DEA.xls %s/*.vs.*.DEG.xls result/DiffExprAnalysis/DEGseq/' %(current,current))
+    run('mv DEGsStat.xls result/DiffExprAnalysis/DEGsStat/')
+
+DEAs = glob.glob('*.vs.*.DEA.xls')
+
+# plot DEA scatter
+if args.scatter is True:
+    print '# plot DEA scatter'
+    if len(DEAs) == 0:
+        print "can NOT find DEA result file (*.vs.*.DEA.xls), please check"
+        sys.exit(2)
+    for DEA in DEAs:
+        run('Rscript %s/DEA_scatter.r %s' %(paths,DEA))
+        pdf2png('%s.DEGsScat' %DEA[:-8])
+
+    checkdir('result/DiffExprAnalysis/DEGsScat')
+    run('mv *.vs.*.DEGsScat.pdf *.vs.*.DEGsScat.png result/DiffExprAnalysis/DEGsScat/')
+
+# plot DEA volcano
+if args.volcano is True:
+    print '# plot DEA volcano'
+    if len(DEAs) == 0:
+        print "can NOT find DEA result file (*.vs.*.DEA.xls), please check"
+        sys.exit(2)
+    for DEA in DEAs:
+        run('Rscript %s/DEA_volcano.r %s' %(paths,DEA))
+        pdf2png('%s.DEGsVolc' %DEA[:-8])
+
+    checkdir('result/DiffExprAnalysis/DEGsVolc')
+    run('mv *.vs.*.DEGsVolc.pdf *.vs.*.DEGsVolc.png result/DiffExprAnalysis/DEGsVolc/')
+
+# plot Heatmap
+if args.heatmap is True:
+    print '# plot Heatmap'
+    if len(DEAs) == 0:
+        print "can NOT find DEA result file (*.vs.*.DEA.xls), please check"
+        sys.exit(2)
+    log = ''
+    if args.log is True:
+        log = 'log'
+    run('perl %s/DEA_heatmap.pl heatmap.xls %s' %(paths,log))
+    run('Rscript %s/heatmap.r heatmap.xls %s' %(utils,log))
+    pdf2png('Heatmap')
+
+    checkdir('result/DiffExprAnalysis/DEGsCluster')
+    run('mv Heatmap.pdf Heatmap.png heatmap.xls result/DiffExprAnalysis/DEGsCluster/')
+
+# plot DEG Venn picture
+if args.venn is True:
+    print '# plot DEG Venn picture'
+    if len(DEAs) == 0:
+        print "can NOT find DEA result file (*.vs.*.DEA.xls), please check"
+        sys.exit(2)
+    if len(DEAs) == 1:
+        print '# the comparison group is only one ,will NOT plot DEG Venn picture'
+    else:
+        run('perl %s/DEA_venn.pl venn.xls' %paths)
+        run('Rscript %s/venn.r venn.xls' %utils)
+        pdf2png('Venn')
+
+        checkdir('result/DiffExprAnalysis/DEGsVenn')
+        run('mv Venn.pdf Venn.png venn.xls result/DiffExprAnalysis/DEGsVenn/')
+
+if args.gf is not None:
+    gofile = args.gf
+if args.GO is True:
+    gofile = 'geneid2go'
+    if gopid.poll() is None:
+        print '## the GO Onthology annotation is going... , please wait'
+        gowait = gopid.wait()
+    print '## the GO Onthology annotation is finished'
+
+if args.kf is not None:
+    keggfile = args.kf
+if args.k is not None:
+    keggfile = 'KEGG.format'
+    if keggpid.poll() is None:
+        print '## the KEGG pathway annotation is going..., please wait'
+        keggwait = keggpid.wait()
+    print '## the KEGG pathway annotation is finished'
+
+# DEG GO and KEGG Enrichment
+if args.Enrichment is True:
+    if len(DEAs) == 0:
+        print "can NOT find DEA result file (*.vs.*.DEA.xls), please check"
+        sys.exit(2)
+
+    if gofile:
+        checkfile(gofile)
+        print '## the Gene Onthology annotation file %s is founded, will DO GO enrichment' %gofile
+        for DEA in DEAs:
+            run('python %s/GOiddiff_enrich.py %s %s %s/GO-index %s.DEG_GO %s.DEG_GOEnrich.xls' %(paths,DEA,gofile,utils,DEA[:-8],DEA[:-8]))
+            pdf2png('%s.BP_DAG' %DEA[:-8])
+            pdf2png('%s.CC_DAG' %DEA[:-8])
+            pdf2png('%s.MF_DAG' %DEA[:-8])
+
+        checkdir('result/GOEnrichment/DEG_GOEnrich')
+        checkdir('result/GOEnrichment/DEG_Enriched_GO_DAG')
+        run('mv *.vs.*.DEG_GO *.vs.*.DEG_GOEnrich.xls result/GOEnrichment/DEG_GOEnrich/')
+        run('mv *.vs.*.*_DAG.pdf *.vs.*.*_DAG.png result/GOEnrichment/DEG_Enriched_GO_DAG/')
+
+    if keggfile:
+        checkfile(keggfile)
+        print '## the KEGG Pathway annotation file %s is founded, will DO KEGG enrichment' %keggfile
+        for DEA in DEAs:
+            run('perl %s/KEGGl3diff_enrich.pl %s %s.DEG.xls %s.DEG_KEGG %s.DEG_KEGGEnrich' %(paths,keggfile,DEA[:-8],DEA[:-8],DEA[:-8]))
+            pdf2png('%s.DEG_KEGGScat' %DEA[:-8])
+
+        checkdir('result/KEGGEnrichment/DEG_KEGGEnrich')
+        checkdir('result/KEGGEnrichment/DEG_KEGGScat')
+        run('mv *.vs.*.DEG_KEGG *.vs.*.DEG_KEGGEnrich.xls result/KEGGEnrichment/DEG_KEGGEnrich/')
+        run('mv *.vs.*.DEG_KEGGScat.pdf *.vs.*.DEG_KEGGScat.png result/KEGGEnrichment/DEG_KEGGScat/')
+
+# get Enriched Pathway picture
+if args.pathway is True:
+    print '# get Enriched Pathway picture'
+    enpathways=glob.glob('*.vs.*.DEG_KEGGEnrich.gene')
+    if len(enpathways) == 0:
+        print 'can NOT find KEGG pathway enichment result file (*.vs.*.DEG_KEGGEnrich.xls.gene), please check'
+        sys.exit(2)
+    for enpathway in enpathways:
+        run('python %s/KEGGdiff2html.py %s %s/koidinmap %s.EnrichedPathway.html' %(paths,enpathway,paths,enpathway[:-20]))
+
+    checkdir('result/KEGGEnrichment/DEG_KEGGPath')
+    run('mv *.vs.*.map *.vs.*.EnrichedPathway.html result/KEGGEnrichment/DEG_KEGGPath/')
+    run('cp %s/kegg.css %s/kegg.js result/KEGGEnrichment/DEG_KEGGPath/' %(paths,paths))

@@ -1,0 +1,1 @@
+for i in `cat bam.list`;do java -Xmx30g -jar /opt/seqtools/source/gatk-3.8.1.0/GenomeAnalysisTK.jar -T DepthOfCoverage -R  /data/hg19/reference/ucsc.hg19.fasta -o "$i".coverage.stat -I "$i".sfm.recal.bam --omitDepthOutputAtEachBase --omitIntervalStatistics -omitLocusTable -ct 1 -ct 5 -ct 10 -ct 20 -nt 30;done

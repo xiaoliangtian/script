@@ -1,0 +1,8 @@
+i=${1/.gz/}
+
+gatk --java-options -Xmx10g VariantRecalibrator -R /data/hg19/reference/ucsc.hg19.fasta -V $1 -mode SNP --max-gaussians 4 -O "$i".snp.recal  --tranches-file "$i".snp.tranches  -an QD  -an MQRankSum -an ReadPosRankSum -an FS -an SOR -tranche 100.0 -tranche 99.9 -tranche 99.0 -tranche 90.0 --resource:hapmap,known=false,training=true,truth=true,prior=15.0 /data/hg19/gatk/hapmap_3.3.hg19.sites.vcf  --resource:omni,known=false,training=true,truth=false,prior=12.0 /data/hg19/gatk/1000G_omni2.5.hg19.sites.vcf --resource:1000G,known=false,training=true,truth=false,prior=10.0 /data/hg19/gatk/1000G_phase1.snps.high_confidence.hg19.sites.vcf --resource:dbsnp,known=true,training=false,truth=false,prior=2.0 /data/hg19/gatk/dbsnp_138.hg19.vcf
+
+gatk --java-options -Xmx10g VariantRecalibrator -R /data/hg19/reference/ucsc.hg19.fasta -V $1 -mode INDEL --max-gaussians 4 -O "$i".indel.recal --tranches-file "$i".indel.tranches -an QD  -an MQRankSum -an ReadPosRankSum -an FS -an SOR -tranche 100.0 -tranche 99.9 -tranche 99.0 -tranche 90.0  --resource:mills,known=false,training=true,truth=true,prior=12.0 /data/hg19/gatk/Mills_and_1000G_gold_standard.indels.hg19.sites.vcf --resource:dbsnp,known=true,training=false,truth=false,prior=2.0 /data/hg19/gatk/dbsnp_138.hg19.vcf
+
+gatk --java-options -Xmx10g  ApplyVQSR -R /data/hg19/reference/ucsc.hg19.fasta -V $1 -mode SNP -O "$i".snp.vqsr.vcf --recal-file "$i".snp.recal  --tranches-file "$i".snp.tranches  --truth-sensitivity-filter-level 99.0
+gatk --java-options -Xmx10g  ApplyVQSR -R /data/hg19/reference/ucsc.hg19.fasta -V $1 -mode INDEL -O "$i".indel.vqsr.vcf --recal-file "$i".indel.recal  --tranches-file "$i".indel.tranches  --truth-sensitivity-filter-level 99.0

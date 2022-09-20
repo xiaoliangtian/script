@@ -1,0 +1,1 @@
+samtools mpileup -q 30 -Q 25 -f /data/hg19/reference/ucsc.hg19.fasta  $1.sfm.recal.bam $2.sfm.recal.bam | java -Xmx20g -jar /opt/seqtools/source/VarScan.jar somatic --mpileup - --output-snp $1_$2.vcf_v2.snp --output-indel $1_$2.vcf_v2.indel --output-vcf 1 --min-coverage 0 --min-var-freq 0.2 --somatic-p-value 0.05
